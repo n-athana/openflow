@@ -44,6 +44,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             Settings.keepMicWarm = on
             if !on, case .idle = self?.state { self?.audio.shutdown() }
         },
+        applyShortcuts: { [weak self] in self?.applyShortcuts() },
+        showSetupGuide: { [weak self] in self?.onboarding.show() },
         vocabulary: VocabularyActions(
             connect: { [weak self] in self?.connectVault($0) },
             chooseFolder: { [weak self] in self?.chooseVaultFolder() },
@@ -53,6 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         )
     ))
     private var scanWatch: AnyCancellable?
+    private lazy var onboarding = OnboardingWindow(model: appModel) { [weak self] in self?.applyShortcuts() }
 
     /// A vault scan pauses whenever OpenFlow is listening, so it never slows recognition down.
     private var state = State.idle {
@@ -81,8 +84,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         Settings.registerDefaults()
         setUpMenu()
         setUpClient()
-        AudioCapture.requestPermission { ok in if !ok { NSLog("OpenFlow: microphone permission denied") } }
-        _ = TextInserter.hasAccessibility(prompt: true)
+        if Settings.onboarded {
+            AudioCapture.requestPermission { ok in if !ok { NSLog("OpenFlow: microphone permission denied") } }
+            _ = TextInserter.hasAccessibility(prompt: true)
+        } else {
+            onboarding.show()  // asks for each permission in turn, with the reason
+        }
         startHotkey()
 
         if !client.connect() { sidecar.start() }
@@ -128,17 +135,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         hotkey.onPress = { [weak self] in self?.keyPressed() }
         hotkey.onRelease = { [weak self] in self?.keyReleased() }
         hotkey.onChord = { [weak self] in self?.cancelDictation() }
-        hotkey.onEscape = { [weak self] in self?.cancelDictation() }
-        hotkey.escapeIsActive = { [weak self] in
+        hotkey.onCancel = { [weak self] in self?.cancelDictation() }
+        hotkey.cancelIsActive = { [weak self] in
             switch self?.state {
             case .recording, .tapPending: return true
             default: return false
             }
         }
-        if !hotkey.start() {
-            CGRequestListenEventAccess()  // Input Monitoring prompt; retry until granted
+        applyShortcuts()
+        if hotkey.start() {
+            appModel.hotkeyActive = true
+        } else {
+            // The setup guide asks for it with an explanation; later launches ask directly.
+            if Settings.onboarded && !onboarding.isVisible { CGRequestListenEventAccess() }
             setStatus("Grant Accessibility and Input Monitoring to OpenFlow")
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.startHotkey() }
+        }
+    }
+
+    /// Takes the shortcuts from Settings; called at launch and whenever they change.
+    private func applyShortcuts() {
+        hotkey.dictationKey = Settings.dictationKey
+        hotkey.cancelKey = Settings.cancelShortcut
+        var shortcuts: [(Shortcut, () -> Void)] = []
+        if let s = Settings.transcriptionShortcut {
+            shortcuts.append((s, { [weak self] in self?.transcriptionShortcut() }))
+        }
+        if let s = Settings.handsFreeShortcut {
+            shortcuts.append((s, { [weak self] in self?.handsFreeShortcut() }))
+        }
+        hotkey.shortcuts = shortcuts
+        appModel.shortcutsRevision += 1
+    }
+
+    /// Double-tapping the dictation key starts transcription, unless it has its own shortcut.
+    private var doubleTapTranscribes: Bool { Settings.transcriptionShortcut == nil }
+
+    private func transcriptionShortcut() {
+        switch state {
+        case .recording, .tapPending:
+            cancelDictation()
+            startTranscription()
+        case .transcribing:
+            stopTranscription()
+        case .idle:
+            startTranscription()
+        case .finishing:
+            break
+        }
+    }
+
+    private func handsFreeShortcut() {
+        switch state {
+        case .recording(_, locked: true): endDictation()
+        case .idle, .finishing: startHandsFree()
+        default: break
         }
     }
 
@@ -148,6 +199,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             cancelDictation()
             startTranscription()
         case .transcribing:  // double-tap again to stop
+            guard doubleTapTranscribes else { return }
             if let last = lastTranscribePress, Date().timeIntervalSince(last) < doubleTapWindow {
                 lastTranscribePress = nil
                 stopTranscription()
@@ -166,6 +218,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private func keyReleased() {
         guard case .recording(let started, locked: false) = state else { return }
         guard Date().timeIntervalSince(started) >= tapThreshold else {
+            guard doubleTapTranscribes else { return cancelDictation() }  // a tap is not a dictation
             state = .tapPending  // keep recording until we know whether a second press follows
             let work = DispatchWorkItem { [weak self] in
                 guard let self, case .tapPending = self.state else { return }
@@ -449,7 +502,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         }
     }
 
-    /// Dictation without holding the key; a single press of right ⌥ finishes it.
+    /// Dictation without holding the key; a single press of the dictation key finishes it.
     @objc private func startHandsFree() {
         guard case .idle = state else { return }
         beginDictation()
@@ -575,6 +628,8 @@ if CommandLine.arguments.contains("--demo") {
     runOverlayDemo()
 } else if CommandLine.arguments.contains("--transcript-demo") {
     runTranscriptDemo()
+} else if let i = CommandLine.arguments.firstIndex(of: "--onboarding-demo") {
+    runOnboardingDemo(step: CommandLine.arguments.dropFirst(i + 1).first.flatMap { Int($0) } ?? 0)
 } else if let i = CommandLine.arguments.firstIndex(of: "--vocabulary-demo") {
     runVocabularyDemo(file: CommandLine.arguments.dropFirst(i + 1).first)
 } else {

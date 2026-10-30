@@ -32,7 +32,9 @@ cd ..
 scripts/make-cert.sh                  # once: stable code signature (see below)
 scripts/build-app.sh && open build/OpenFlow.app
 ```
-On first launch, grant permissions in **System Settings → Privacy & Security**:
+On first launch a setup guide walks you through the permissions (one at a time, each with the
+reason), lets you pick your dictation key and gives you a field to try it. It's also in Settings →
+General → Setup guide. The permissions, all in **System Settings → Privacy & Security**:
 - **Microphone** to capture audio
 - **Accessibility** to paste with ⌘V
 - **Input Monitoring** for the global hotkey
@@ -40,7 +42,8 @@ On first launch, grant permissions in **System Settings → Privacy & Security**
   mode (asked on the first transcription). Until it's granted, macOS delivers silence: the panel's
   "Them" meter stays flat even while others talk
 
-Quit and reopen OpenFlow after granting them. Settings… in the menu bar menu opens the OpenFlow
+macOS applies Accessibility and Input Monitoring after a restart; the guide offers a "Restart
+OpenFlow" button when that's still pending. Settings… in the menu bar menu opens the OpenFlow
 window, whose General page shows the recognizer's status, Restart, Open Log and Launch at Login.
 
 **Why make-cert?** macOS ties the three permissions to the app's code signature. Without a stable
@@ -51,10 +54,16 @@ no password prompt and no trust settings, and `build-app.sh` uses it automatical
 Remove it with `scripts/make-cert.sh --remove`.
 
 ## Usage
+The defaults below can be changed in Settings → General → Shortcuts.
 - **Hold right ⌥** and talk. The mic stays open 300 ms after release, so the last syllable isn't clipped.
+  The dictation key can also be left ⌥, right ⌘, right ⇧, right ⌃ or fn 🌐 (for 🌐, set "Press 🌐
+  key to" to "Do Nothing" in System Settings → Keyboard).
 - **Double-tap right ⌥** starts transcription mode; double-tap again (or the stop button) to finish.
-- **Esc** cancels a dictation; nothing is pasted.
-- Right ⌥ plus another key (e.g. ⌥L for @) still works as a normal shortcut and cancels the dictation.
+  Or record your own combination (e.g. ⌃⌥T); then a tap of the dictation key does nothing.
+- **Esc** cancels a dictation; nothing is pasted. Any key can take its place.
+- **Hands-free dictation** can get its own combination too (otherwise it's in the menu).
+- The dictation key plus another key (e.g. ⌥L for @) still works as a normal shortcut and cancels the
+  dictation.
 
 The menu bar menu has the quick actions:
 - **Start / Stop Transcription.**
@@ -227,6 +236,7 @@ OpenFlow.app (Swift, menu bar)                    asr/server.py (Python sidecar)
 | `cd asr && uv run sweep.py --vault ~/notes --out /tmp/Vocabulary.md` | Learn a vocabulary from a vault (`--no-llm`: rules only) |
 | `cd asr && uv run bench_vocab.py [--vocabulary FILE] [--show]` | Term recall and damage to ordinary speech, boost off vs. on |
 | `cd asr && uv run bench_llm.py mlx:<hf id> ollama:<tag> [--task sweep --vault … --gold …]` | Compare LLMs on transcript polish and vault extraction, with the production prompts |
+| `build/OpenFlow.app/Contents/MacOS/OpenFlow --onboarding-demo [STEP]` | The setup guide, from step 0–3 |
 | `build/OpenFlow.app/Contents/MacOS/OpenFlow --vocabulary-demo [FILE]` | The OpenFlow window on a copy of a vocabulary file (`OPENFLOW_DEMO_PAGE=General` for another page) |
 | `swift scripts/make-icon.swift app/Resources/AppIcon.icns` | Regenerate the app icon |
 

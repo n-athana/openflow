@@ -149,7 +149,7 @@ private struct TranscriptView: View {
                 .buttonStyle(.plain)
                 .disabled(model.finishing)
                 .opacity(model.finishing ? 0.4 : 1)
-                .help("Stop (or double-tap right ⌥)")
+                .help("Stop (or \(ShortcutHints.transcribe.lowercasedFirst))")
             }
         }
     }

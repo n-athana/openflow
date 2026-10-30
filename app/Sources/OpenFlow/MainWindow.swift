@@ -21,6 +21,10 @@ final class AppModel: ObservableObject {
     @Published var status = "ASR: starting…"
     @Published var transcribing = false
     @Published var transcriptsFolder = Settings.transcriptsFolder
+    /// The event tap is running (Input Monitoring granted and taking effect).
+    @Published var hotkeyActive = false
+    /// Bumped when shortcuts change, so hints redraw.
+    @Published var shortcutsRevision = 0
 }
 
 /// What the window's pages can ask the app to do (settings with side effects go through here).
@@ -32,6 +36,8 @@ struct AppActions {
     var openTranscripts: () -> Void
     var setMicrophone: (String) -> Void
     var setKeepMicWarm: (Bool) -> Void
+    var applyShortcuts: () -> Void
+    var showSetupGuide: () -> Void
     var vocabulary: VocabularyActions
 }
 
@@ -63,7 +69,12 @@ final class MainWindow {
         window.setFrameAutosaveName("OpenFlowMain")
         closeObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification, object: window, queue: .main
-        ) { _ in NSApp.setActivationPolicy(.accessory) }
+        ) { [window] _ in
+            // Back to the menu bar only, unless the setup guide is still open.
+            if !NSApp.windows.contains(where: { $0 !== window && $0.isVisible && $0.styleMask.contains(.titled) }) {
+                NSApp.setActivationPolicy(.accessory)
+            }
+        }
     }
 
     func show(_ page: AppModel.Page? = nil) {
@@ -166,13 +177,11 @@ private struct GeneralPage: View {
                     }
                 }
             }
-            Section("Shortcuts") {
-                LabeledContent("Dictate", value: "Hold right ⌥")
-                LabeledContent("Transcribe a meeting", value: "Double-tap right ⌥")
-                LabeledContent("Cancel", value: "Esc")
-                LabeledContent("Hands-free dictation", value: "Menu bar → Hands-Free Dictation")
-            }
+            ShortcutsSection(model: model, actions: actions)
             Section {
+                LabeledContent("Setup guide") {
+                    Button("Show…", action: actions.showSetupGuide)
+                }
                 Toggle("Sounds", isOn: $sounds).onChange(of: sounds) { Settings.sounds = sounds }
                 Toggle("Launch at login", isOn: $login).onChange(of: login) {
                     do {
@@ -185,6 +194,48 @@ private struct GeneralPage: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+private struct ShortcutsSection: View {
+    @ObservedObject var model: AppModel
+    var actions: AppActions
+    @State private var key = Settings.dictationKey
+    @State private var transcription = Settings.transcriptionShortcut
+    @State private var handsFree = Settings.handsFreeShortcut
+    @State private var cancel: Shortcut? = Settings.cancelShortcut == .escape ? nil : Settings.cancelShortcut
+
+    var body: some View {
+        Section {
+            Picker("Dictate: hold", selection: $key) {
+                ForEach(DictationKey.allCases) { Text($0.name.capitalizingFirst).tag($0) }
+            }
+            .onChange(of: key) { Settings.dictationKey = key; actions.applyShortcuts() }
+            LabeledContent("Transcribe a meeting") {
+                ShortcutRecorder(shortcut: $transcription, placeholder: "Double-tap \(key.name)") {
+                    Settings.transcriptionShortcut = transcription
+                    actions.applyShortcuts()
+                }
+            }
+            LabeledContent("Hands-free dictation") {
+                ShortcutRecorder(shortcut: $handsFree, placeholder: "Menu bar only") {
+                    Settings.handsFreeShortcut = handsFree
+                    actions.applyShortcuts()
+                }
+            }
+            LabeledContent("Cancel a dictation") {
+                ShortcutRecorder(shortcut: $cancel, placeholder: "Esc", requireModifier: false) {
+                    Settings.cancelShortcut = cancel ?? .escape
+                    actions.applyShortcuts()
+                }
+            }
+        } header: {
+            Text("Shortcuts")
+        } footer: {
+            Text(model.hotkeyActive ? "Click a shortcut, then press the keys. Combinations need ⌘, ⌥ or ⌃."
+                 : "Shortcuts don't work yet: allow Input Monitoring and Accessibility (Setup guide), then restart OpenFlow.")
+                .foregroundStyle(model.hotkeyActive ? AnyShapeStyle(.secondary) : AnyShapeStyle(.orange))
+        }
     }
 }
 
@@ -247,7 +298,7 @@ private struct TranscriptionPage: View {
                     }
                 }
             } footer: {
-                Text("Double-tap right ⌥ to start or stop. Always get consent when transcribing others.")
+                Text("\(ShortcutHints.transcribe) to start or stop. Always get consent when transcribing others.")
             }
             Section {
                 Toggle("Cancel speaker echo", isOn: $cancelEcho).onChange(of: cancelEcho) { Settings.cancelEcho = cancelEcho }

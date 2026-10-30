@@ -101,9 +101,19 @@ func runVocabularyDemo(file: String?) {
     let vocabulary = VocabularyActions(connect: { _ in }, chooseFolder: {}, disconnect: {}, rescan: {}, setUseVocabulary: { _ in })
     let window = MainWindow(model: AppModel(), store: store, sweeper: sweeper, actions: AppActions(
         toggleTranscription: {}, restartASR: {}, openLog: {}, chooseTranscriptsFolder: {}, openTranscripts: {},
-        setMicrophone: { _ in }, setKeepMicWarm: { _ in }, vocabulary: vocabulary
+        setMicrophone: { _ in }, setKeepMicWarm: { _ in }, applyShortcuts: {}, showSetupGuide: {}, vocabulary: vocabulary
     ))
     retainedVocabularyDemo = (store, sweeper, window)
     let page = ProcessInfo.processInfo.environment["OPENFLOW_DEMO_PAGE"].flatMap(AppModel.Page.init(rawValue:))
     window.show(page ?? .vocabulary)
+}
+
+private var retainedOnboardingDemo: OnboardingWindow?
+
+/// The first-run guide, starting at `step` (0–3); permissions show this binary's real state.
+func runOnboardingDemo(step: Int) {
+    Settings.registerDefaults()
+    let window = OnboardingWindow(model: AppModel(), step: step) {}
+    retainedOnboardingDemo = window
+    window.show()
 }
