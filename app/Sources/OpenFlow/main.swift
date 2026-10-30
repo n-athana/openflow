@@ -1,14 +1,17 @@
 import AppKit
+import Combine
 import ServiceManagement
+import UserNotifications
 
 if CommandLine.arguments.contains("--selftest") {
     let fillers = FillerFilter.selfTest()
     let formatting = TextFormatter.selfTest()
     let echo = Transcriber.echoSelfTest()
-    exit(fillers && formatting && echo ? 0 : 1)
+    let vocabulary = VocabularyStore.selfTest()
+    exit(fillers && formatting && echo && vocabulary ? 0 : 1)
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
     /// recording: key held (or locked hands-free). tapPending: a short tap that may become a double-tap.
     /// transcribing: transcription mode (double-tap); dictation is off until it stops.
     private enum State { case idle, recording(Date, locked: Bool), tapPending, finishing, transcribing }
@@ -24,8 +27,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let overlay = OverlayPanel()
     private lazy var transcriber = Transcriber(client: client, socketPath: socketPath, mic: audio)
     private lazy var transcriptPanel = TranscriptPanel(model: transcriber.model)
+    private lazy var vocabulary = VocabularyStore()
+    private lazy var sweeper = VaultSweeper(asrDir: sidecar.asrDir)
+    private let appModel = AppModel()
+    private lazy var mainWindow = MainWindow(model: appModel, store: vocabulary, sweeper: sweeper, actions: AppActions(
+        toggleTranscription: { [weak self] in self?.toggleTranscription() },
+        restartASR: { [weak self] in self?.restartASR() },
+        openLog: { [weak self] in self?.openLog() },
+        chooseTranscriptsFolder: { [weak self] in self?.chooseTranscriptsFolder() },
+        openTranscripts: { [weak self] in self?.openTranscripts() },
+        setMicrophone: { [weak self] uid in
+            Settings.microphone = uid
+            self?.audio.shutdown()  // reopen on the new device next time
+        },
+        setKeepMicWarm: { [weak self] on in
+            Settings.keepMicWarm = on
+            if !on, case .idle = self?.state { self?.audio.shutdown() }
+        },
+        vocabulary: VocabularyActions(
+            connect: { [weak self] in self?.connectVault($0) },
+            chooseFolder: { [weak self] in self?.chooseVaultFolder() },
+            disconnect: { [weak self] in self?.sweeper.disconnect() },
+            rescan: { [weak self] in self?.sweeper.scan(requested: true) },
+            setUseVocabulary: { [weak self] in self?.setUseVocabulary($0) }
+        )
+    ))
+    private var scanWatch: AnyCancellable?
 
-    private var state = State.idle
+    /// A vault scan pauses whenever OpenFlow is listening, so it never slows recognition down.
+    private var state = State.idle {
+        didSet {
+            if case .idle = state { sweeper.resume() } else { sweeper.pause() }
+            if case .transcribing = state { appModel.transcribing = true } else { appModel.transcribing = false }
+        }
+    }
     private var lang: String?
     private var session = 0
     /// ASR session of the current dictation; events from older sessions are ignored.
@@ -53,10 +88,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !client.connect() { sidecar.start() }
         scheduleReconnect()
 
+        UNUserNotificationCenter.current().delegate = self
+        sweeper.isBusy = { [weak self] in
+            guard let self else { return false }
+            if case .idle = self.state { return false }
+            return true
+        }
+        sweeper.onFinished = { [weak self] in self?.notifyScanned($0) }
+        sweeper.start()
+        // The menu bar icon shows a dot while a scan runs.
+        scanWatch = sweeper.$running.receive(on: DispatchQueue.main).sink { [weak self] running in
+            self?.statusItem.button?.image = Self.menuBarIcon(badge: running)
+        }
+
         // Scripts and Shortcuts can toggle transcription mode (see README).
         DistributedNotificationCenter.default().addObserver(
             forName: Notification.Name("dev.openflow.toggleTranscription"), object: nil, queue: .main
         ) { [weak self] _ in self?.toggleTranscription() }
+    }
+
+    /// Opening OpenFlow again (Spotlight, Finder) while it runs shows its window.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        mainWindow.show()
+        return false
     }
 
     func applicationWillTerminate(_ note: Notification) {
@@ -283,35 +337,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func setUpMenu() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = Self.menuBarIcon()
+        statusItem.button?.image = Self.menuBarIcon(badge: false)
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
     }
 
-    /// Rebuilt on every open so device list, history and checkmarks are current.
+    /// Quick actions only; settings and the vocabulary live in the OpenFlow window. Rebuilt on every
+    /// open so history and status are current.
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         let status = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
         status.isEnabled = false
         menu.addItem(status)
-        menu.addItem(NSMenuItem(title: "Hold right ⌥ to dictate · double-tap to transcribe · Esc cancels", action: nil, keyEquivalent: ""))
-        menu.items.last?.isEnabled = false
+        // A scan or a pending review shows up here, not buried in a submenu.
+        if sweeper.running, let vault = Settings.vault {
+            var line = "Learning from \(VaultSweeper.name(of: vault))…"
+            if case .reading(let done, let total) = sweeper.phase, total > 0 { line += " \(done)/\(total)" }
+            menu.addItem(item(line, #selector(openVocabulary), symbol: "arrow.triangle.2.circlepath"))
+        } else if !vocabulary.unreviewed.isEmpty {
+            menu.addItem(item("\(vocabulary.unreviewed.count) new terms to review…", #selector(openVocabulary), symbol: "sparkles"))
+        }
         menu.addItem(.separator())
 
         if case .transcribing = state {
-            menu.addItem(item("Stop Transcription", #selector(toggleTranscription)))
+            menu.addItem(item("Stop Transcription", #selector(toggleTranscription), symbol: "stop.circle"))
         } else {
-            menu.addItem(item("Start Transcription", #selector(toggleTranscription)))
-            menu.addItem(item("Hands-Free Dictation", #selector(startHandsFree)))
+            menu.addItem(item("Start Transcription", #selector(toggleTranscription), symbol: "text.bubble"))
+            menu.addItem(item("Hands-Free Dictation", #selector(startHandsFree), symbol: "mic"))
         }
-        menu.addItem(item("Open Transcripts Folder", #selector(openTranscripts)))
-        let folder = item("Change Transcripts Folder…", #selector(chooseTranscriptsFolder))
-        folder.toolTip = Settings.transcriptsFolder.path
-        menu.addItem(folder)
         menu.addItem(.separator())
 
-        let last = item("Paste Last Dictation", #selector(pasteHistory(_:)))
+        let last = item("Paste Last Dictation", #selector(pasteHistory(_:)), symbol: "doc.on.clipboard")
         last.tag = 0
         last.isEnabled = !history.isEmpty
         menu.addItem(last)
@@ -328,54 +385,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(.separator())
 
-        let languages = NSMenu()
-        for (code, name) in [("auto", "Detect Automatically"), ("de-DE", "Deutsch"), ("en-US", "English")] {
-            let entry = item(name, #selector(chooseLanguage(_:)))
-            entry.representedObject = code
-            entry.state = Settings.language == code ? .on : .off
-            languages.addItem(entry)
-        }
-        menu.addItem(submenu("Language", languages))
-
-        let mics = NSMenu()
-        let auto = AudioDevices.resolve("auto")
-        for (code, name) in [("auto", "Automatic (avoid Bluetooth)" + (auto.map { " – \($0.name)" } ?? "")),
-                             ("default", "System Default")] {
-            let entry = item(name, #selector(chooseMicrophone(_:)))
-            entry.representedObject = code
-            entry.state = Settings.microphone == code ? .on : .off
-            mics.addItem(entry)
-        }
-        mics.addItem(.separator())
-        for device in AudioDevices.inputs() {
-            let entry = item(device.name + (device.isBluetooth ? " (Bluetooth)" : ""), #selector(chooseMicrophone(_:)))
-            entry.representedObject = device.uid
-            entry.state = Settings.microphone == device.uid ? .on : .off
-            mics.addItem(entry)
-        }
-        menu.addItem(submenu("Microphone", mics))
-
-        menu.addItem(toggle("Sounds", Settings.sounds, #selector(toggleSounds)))
-        menu.addItem(toggle("Add Space After Text", Settings.trailingSpace, #selector(toggleTrailingSpace)))
-        menu.addItem(toggle("Keep Mic Ready for 30 s", Settings.keepMicWarm, #selector(toggleKeepMicWarm)))
-        menu.addItem(toggle("Cancel Speaker Echo While Transcribing", Settings.cancelEcho, #selector(toggleCancelEcho)))
-        menu.addItem(toggle("Launch at Login", SMAppService.mainApp.status == .enabled, #selector(toggleLogin)))
-        menu.addItem(.separator())
-        menu.addItem(item("Restart ASR", #selector(restartASR)))
-        menu.addItem(item("Open ASR Log", #selector(openLog)))
+        menu.addItem(item("Vocabulary…", #selector(openVocabulary), symbol: "character.book.closed"))
+        let settings = item("Settings…", #selector(openSettings), symbol: "gearshape")
+        settings.keyEquivalent = ","
+        menu.addItem(settings)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit OpenFlow", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     }
 
-    private func item(_ title: String, _ action: Selector) -> NSMenuItem {
+    private func item(_ title: String, _ action: Selector, symbol: String? = nil) -> NSMenuItem {
         let i = NSMenuItem(title: title, action: action, keyEquivalent: "")
         i.target = self
-        return i
-    }
-
-    private func toggle(_ title: String, _ on: Bool, _ action: Selector) -> NSMenuItem {
-        let i = item(title, action)
-        i.state = on ? .on : .off
+        if let symbol { i.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) }
         return i
     }
 
@@ -385,8 +406,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return i
     }
 
-    /// Template version of the app icon's five-bar waveform.
-    private static func menuBarIcon() -> NSImage {
+    /// Template version of the app icon's five-bar waveform; `badge` adds a dot (a scan is running).
+    private static func menuBarIcon(badge: Bool) -> NSImage {
         let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
             let heights: [CGFloat] = [0.34, 0.62, 1.0, 0.74, 0.42]
             let w: CGFloat = 2, gap: CGFloat = 1.6, maxH: CGFloat = 13
@@ -397,15 +418,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 NSBezierPath(roundedRect: NSRect(x: x, y: rect.midY - bh / 2, width: w, height: bh), xRadius: w / 2, yRadius: w / 2).fill()
                 x += w + gap
             }
+            if badge {
+                NSBezierPath(ovalIn: NSRect(x: rect.maxX - 5, y: rect.maxY - 5, width: 5, height: 5)).fill()
+            }
             return true
         }
         image.isTemplate = true
-        image.accessibilityDescription = "OpenFlow"
+        image.accessibilityDescription = badge ? "OpenFlow, learning vocabulary" : "OpenFlow"
         return image
     }
 
     private func setStatus(_ s: String) {
         statusText = s
+        appModel.status = s
         statusItem.button?.appearsDisabled = !client.isConnected
     }
 
@@ -433,12 +458,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         overlay.model.locked = true
     }
 
-    @objc private func openTranscripts() {
+    @objc private func openSettings() { mainWindow.show(.general) }
+
+    private func openTranscripts() {
         try? FileManager.default.createDirectory(at: Settings.transcriptsFolder, withIntermediateDirectories: true)
         NSWorkspace.shared.open(Settings.transcriptsFolder)
     }
 
-    @objc private func chooseTranscriptsFolder() {
+    private func chooseTranscriptsFolder() {
         let panel = NSOpenPanel()
         panel.title = "Transcripts Folder"
         panel.message = "New transcripts are saved here as Markdown."
@@ -450,46 +477,81 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.activate()  // a menu bar app's panel would otherwise open behind other windows
         guard panel.runModal() == .OK, let url = panel.url else { return }
         Settings.transcriptsFolder = url
+        appModel.transcriptsFolder = url
     }
 
-    @objc private func chooseLanguage(_ sender: NSMenuItem) {
-        Settings.language = sender.representedObject as? String ?? "auto"
-    }
-
-    @objc private func chooseMicrophone(_ sender: NSMenuItem) {
-        Settings.microphone = sender.representedObject as? String ?? "auto"
-        audio.shutdown()  // reopen on the new device next time
-    }
-
-    @objc private func toggleSounds() { Settings.sounds.toggle() }
-    @objc private func toggleTrailingSpace() { Settings.trailingSpace.toggle() }
-
-    @objc private func toggleCancelEcho() { Settings.cancelEcho.toggle() }
-
-    @objc private func toggleKeepMicWarm() {
-        Settings.keepMicWarm.toggle()
-        if !Settings.keepMicWarm, case .idle = state { audio.shutdown() }
-    }
-
-    @objc private func restartASR() {
+    private func restartASR() {
         setStatus("ASR: restarting…")
         sidecar.restart()
     }
 
-    @objc private func openLog() {
+    private func openLog() {
         NSWorkspace.shared.open(URL(fileURLWithPath: sidecar.logPath))
     }
 
-    @objc private func toggleLogin() {
-        do {
-            if SMAppService.mainApp.status == .enabled {
-                try SMAppService.mainApp.unregister()
-            } else {
-                try SMAppService.mainApp.register()
-            }
-        } catch {
-            NSLog("OpenFlow: launch at login failed: %@", error.localizedDescription)
+    // MARK: - Vocabulary
+
+    @objc private func openVocabulary() {
+        vocabulary.ensureFile()
+        mainWindow.show(.vocabulary)
+    }
+
+    private func connectVault(_ url: URL) {
+        vocabulary.ensureFile()
+        sweeper.connect(url)
+        mainWindow.show(.vocabulary)  // the scan's progress shows there
+    }
+
+    private func chooseVaultFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "Connect a Vault"
+        panel.message = "Choose an Obsidian vault or any folder of Markdown notes. OpenFlow only reads it."
+        panel.prompt = "Connect"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        NSApp.activate()
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        connectVault(url)
+    }
+
+    private func setUseVocabulary(_ on: Bool) {
+        guard on != Settings.useVocabulary else { return }
+        Settings.useVocabulary = on
+        restartASR()  // the server takes the file as a launch argument
+    }
+
+    /// A scan you asked for always reports back; a background resync only when it found something.
+    private func notifyScanned(_ r: VaultSweeper.Result) {
+        guard let vault = Settings.vault, r.requested || r.added > 0 else { return }
+        let name = VaultSweeper.name(of: vault)
+        let content = UNMutableNotificationContent()
+        if r.first {
+            content.title = "Learned \(r.total) terms from \(name)"
+        } else if r.added > 0 {
+            content.title = "\(r.added) new terms from \(name)"
+        } else {
+            content.title = "Vocabulary up to date"
         }
+        var body = ["\(r.total) terms"]
+        if r.removed > 0 { body.append("\(r.removed) no longer in your notes") }
+        body.append(vocabulary.unreviewed.isEmpty ? "OpenFlow listens for them." : "Click to review the new ones.")
+        content.body = body.joined(separator: " · ")
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert]) { granted, _ in
+            guard granted else { return }
+            center.add(UNNotificationRequest(identifier: "vocabulary", content: content, trigger: nil))
+        }
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                withCompletionHandler done: @escaping () -> Void) {
+        DispatchQueue.main.async { self.openVocabulary() }
+        done()
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                                withCompletionHandler done: @escaping (UNNotificationPresentationOptions) -> Void) {
+        done([.banner])
     }
 }
 
@@ -513,6 +575,8 @@ if CommandLine.arguments.contains("--demo") {
     runOverlayDemo()
 } else if CommandLine.arguments.contains("--transcript-demo") {
     runTranscriptDemo()
+} else if let i = CommandLine.arguments.firstIndex(of: "--vocabulary-demo") {
+    runVocabularyDemo(file: CommandLine.arguments.dropFirst(i + 1).first)
 } else {
     let delegate = AppDelegate()
     app.delegate = delegate

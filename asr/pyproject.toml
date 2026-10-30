@@ -11,4 +11,5 @@ dependencies = [
     "protobuf",
     "librosa>=1.0.0",
     "mlx-lm>=0.32",
+    "wordfreq>=3.1.1",
 ]

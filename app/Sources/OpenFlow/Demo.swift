@@ -86,3 +86,24 @@ func runTranscriptDemo() {
 }
 
 private var retainedTranscriptDemo: (TranscriptModel, TranscriptPanel)?
+
+private var retainedVocabularyDemo: (VocabularyStore, VaultSweeper, MainWindow)?
+
+/// The OpenFlow window on its Vocabulary page, with a copy of a vocabulary file (default: an
+/// empty one); no vault, no ASR.
+func runVocabularyDemo(file: String?) {
+    Settings.registerDefaults()
+    let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("openflow-vocabulary-demo.md")
+    try? FileManager.default.removeItem(at: url)
+    if let file { try? FileManager.default.copyItem(atPath: file, toPath: url.path) }
+    let store = VocabularyStore(url: url)
+    let sweeper = VaultSweeper(asrDir: "")
+    let vocabulary = VocabularyActions(connect: { _ in }, chooseFolder: {}, disconnect: {}, rescan: {}, setUseVocabulary: { _ in })
+    let window = MainWindow(model: AppModel(), store: store, sweeper: sweeper, actions: AppActions(
+        toggleTranscription: {}, restartASR: {}, openLog: {}, chooseTranscriptsFolder: {}, openTranscripts: {},
+        setMicrophone: { _ in }, setKeepMicWarm: { _ in }, vocabulary: vocabulary
+    ))
+    retainedVocabularyDemo = (store, sweeper, window)
+    let page = ProcessInfo.processInfo.environment["OPENFLOW_DEMO_PAGE"].flatMap(AppModel.Page.init(rawValue:))
+    window.show(page ?? .vocabulary)
+}

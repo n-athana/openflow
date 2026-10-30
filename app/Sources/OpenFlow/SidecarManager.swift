@@ -15,19 +15,22 @@ final class SidecarManager {
         self.socketPath = socketPath
     }
 
+    /// uv isn't on a GUI app's PATH.
+    static let uv = ["/opt/homebrew/bin/uv", "/usr/local/bin/uv", NSHomeDirectory() + "/.local/bin/uv"]
+        .first { FileManager.default.isExecutableFile(atPath: $0) } ?? "uv"
+
     func start() {
         stopping = false
         guard process?.isRunning != true else { return }
-        let uv = ["/opt/homebrew/bin/uv", "/usr/local/bin/uv", NSHomeDirectory() + "/.local/bin/uv"]
-            .first { FileManager.default.isExecutableFile(atPath: $0) } ?? "uv"
 
         FileManager.default.createFile(atPath: logPath, contents: nil)
         let log = FileHandle(forWritingAtPath: logPath)
         log?.seekToEndOfFile()
 
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: uv)
-        p.arguments = ["run", "--project", asrDir, "python", "server.py", "--socket", socketPath]
+        p.executableURL = URL(fileURLWithPath: Self.uv)
+        p.arguments = ["run", "--project", asrDir, "python", "server.py", "--socket", socketPath,
+                       "--vocabulary", Settings.useVocabulary ? Settings.vocabularyFile.path : ""]
         p.currentDirectoryURL = URL(fileURLWithPath: asrDir)
         var env = ProcessInfo.processInfo.environment
         env["HF_HUB_OFFLINE"] = env["HF_HUB_OFFLINE"] ?? "1"  // model is cached; skip network checks

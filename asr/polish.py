@@ -26,6 +26,8 @@ Do:
 - write times, amounts, percentages and dates as digits in the segment's language style
   ("zehn Uhr" -> "10 Uhr", "two point five million" -> "2.5 million", "zwei komma fünf" -> "2,5")
 - keep English terms inside German sentences as spoken (Deployment, Pipeline, gepusht, failt)
+- the context may list the speaker's domain and known terms: when the segment clearly means one
+  of them (it sounds alike), write it exactly as listed; otherwise ignore the list
 
 Never:
 - translate, summarize, shorten, or add content
@@ -37,6 +39,8 @@ Segment: ähm also ich ich denke wir sollten das am am Freitag um elf Uhr machen
 Output: Also ich denke, wir sollten das am Freitag um 11 Uhr machen.
 Segment: so the the new build is is like uh twenty percent faster i think
 Output: So the new build is like 20 percent faster, I think."""
+
+GLOSSARY_SIZE = 15
 
 THINK = re.compile(r"<think>.*?</think>", re.S)
 LABEL = re.compile(r"^((Segment|Output):\s*)+")
@@ -53,8 +57,27 @@ class Polisher:
         self.gpu = gpu or threading.Lock()
         self.model_id = model_id
         self.model = self.tok = None
+        self.vocab = None
         self.jobs: queue.Queue = queue.Queue()
         threading.Thread(target=self._run, daemon=True).start()
+
+    def set_vocabulary(self, vocab):
+        self.vocab = vocab
+
+    def context(self, text: str) -> str:
+        """The domain plus the few vocabulary terms that resemble something in the segment:
+        a short prompt keeps the polish at ~200 ms even with a thousand terms."""
+        v = self.vocab
+        if not v or not (v.domain or v.terms):
+            return ""
+        lines = [f"Domain: {v.domain}"] if v.domain else []
+        terms = [
+            t.text + (f" (often misheard as: {', '.join(t.aliases)})" if t.aliases else "")
+            for t in relevant(v.terms, text, GLOSSARY_SIZE)
+        ]
+        if terms:
+            lines.append("Known terms: " + "; ".join(terms))
+        return "\n".join(lines)
 
     def submit(self, text: str, done):
         self.jobs.put((text, done))
@@ -80,24 +103,73 @@ class Polisher:
             return text
         from mlx_lm import stream_generate
 
-        msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": f"Segment: {text}\nOutput:"}]
-        prompt = self.tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False, enable_thinking=False)
+        prompt = self.tok.apply_chat_template(messages(text, self.context(text)), add_generation_prompt=True,
+                                              tokenize=False, enable_thinking=False)
         out = ""
-        for r in stream_generate(self.model, self.tok, prompt, max_tokens=len(text) // 2 + 40):
+        for r in stream_generate(self.model, self.tok, prompt, max_tokens=max_tokens(text)):
             out += r.text
             visible = THINK.sub("", out).lstrip()
             if "<think>" not in visible and "\n" in visible:  # one segment = one line
                 break
-        out = LABEL.sub("", THINK.sub("", out).strip().split("\n")[0]).strip().strip('"').strip()
-        # A cleanup changes length a little; much shorter or longer means it summarized or answered.
-        if not out or not 0.5 <= len(out) / len(text) <= 1.5:
-            log.warning("polish output rejected: %r -> %r", text, out)
-            return text
-        return out
+        return finish(text, out)
+
+
+def messages(text: str, context: str = "") -> list[dict]:
+    context = f"Context (never output this):\n{context}\n" if context else ""
+    return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": f"{context}Segment: {text}\nOutput:"}]
+
+
+def max_tokens(text: str) -> int:
+    return len(text) // 2 + 40
+
+
+def finish(text: str, out: str) -> str:
+    """The model's first line, without labels; the input if the output looks off script."""
+    out = LABEL.sub("", THINK.sub("", out).strip().split("\n")[0]).strip().strip('"').strip()
+    # A cleanup changes length a little; much shorter or longer means it summarized or answered.
+    if not out or not 0.5 <= len(out) / len(text) <= 1.5:
+        log.warning("polish output rejected: %r -> %r", text, out)
+        return text
+    return out
+
+
+def trigrams(text: str) -> set[str]:
+    s = f" {re.sub(r'[^\w]+', ' ', text.lower()).strip()} "
+    return {s[i : i + 3] for i in range(len(s) - 2)}
+
+
+def relevant(terms, text: str, k: int) -> list:
+    """Terms (or their aliases) that look like a stretch of the segment, best first."""
+    words = text.split()
+    windows = [trigrams(" ".join(words[i : i + n])) for n in (1, 2, 3) for i in range(len(words) - n + 1)]
+    scored = []
+    for t in terms:
+        best = 0.0
+        for form in (t.text, *t.aliases):
+            tg = trigrams(form)
+            for w in windows:
+                if score := len(tg & w) / len(tg | w):
+                    best = max(best, score)
+        if best >= 0.3:
+            scored.append((best, t))
+    scored.sort(key=lambda x: -x[0])
+    return [t for _, t in scored[:k]]
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
+    import vocab
+
     p = Polisher()
-    for raw in sys.argv[1:] or ["so the the new deployment is uh like thirty percent faster"]:
-        print(p.polish(raw))
+    p.set_vocabulary(vocab.load(sys.argv[1]) if sys.argv[1:2] and sys.argv[1].endswith(".md") else vocab.parse(
+        "Domain: logistics IT, local AI tools\n## Terms\n- Nemotron\n- Gemma\n- LUMAI\n"
+        "- Data Garage\n- pull request (heard as: pool request)\n## People\n- Katrin Ruppert\n- Malte Oetjen\n"))
+    raws = [a for a in sys.argv[1:] if not a.endswith(".md")] or [
+        "so the the new deployment is uh like thirty percent faster",
+        "ich hab mit malte ötien über die lumai roadmap gesprochen",
+        "we run nemo tron and gem locally",
+        "katherine rupert schickt den pool request morgen",
+        "das ist in der data garage am freitag um zehn",
+    ]
+    for raw in raws:
+        print(f"{raw}\n  -> {p.polish(raw)}")

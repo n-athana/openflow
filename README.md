@@ -11,6 +11,8 @@ text is pasted into whatever field has focus: Claude, Slack, a browser, anything
   badge shows the detected language.
 - **Clean output:** fillers (äh, ähm, öh, hm; um, uh, erm in English) are removed, and your clipboard
   is restored after pasting.
+- **Your vocabulary:** names, acronyms and project words from your Obsidian vault (or a Markdown file)
+  steer the recognizer, so "Lena", "ACME" and "Data Garage" come out right.
 - **Transcription mode:** double-tap right ⌥ in a meeting. A side panel transcribes **You** (your mic)
   and **Them** (whatever your Mac plays) and saves Markdown as you go; a small local LLM cleans up
   each segment.
@@ -38,8 +40,8 @@ On first launch, grant permissions in **System Settings → Privacy & Security**
   mode (asked on the first transcription). Until it's granted, macOS delivers silence: the panel's
   "Them" meter stays flat even while others talk
 
-Quit and reopen OpenFlow after granting them. The menu bar icon has a status line, Restart ASR,
-Open ASR Log and Launch at Login.
+Quit and reopen OpenFlow after granting them. Settings… in the menu bar menu opens the OpenFlow
+window, whose General page shows the recognizer's status, Restart, Open Log and Launch at Login.
 
 **Why make-cert?** macOS ties the three permissions to the app's code signature. Without a stable
 signature, every rebuild is a "new" app and you have to grant everything again. `make-cert.sh`
@@ -54,21 +56,27 @@ Remove it with `scripts/make-cert.sh --remove`.
 - **Esc** cancels a dictation; nothing is pasted.
 - Right ⌥ plus another key (e.g. ⌥L for @) still works as a normal shortcut and cancels the dictation.
 
-The menu bar menu has:
-- **Start / Stop Transcription**, **Open Transcripts Folder**, **Change Transcripts Folder…**
+The menu bar menu has the quick actions:
+- **Start / Stop Transcription.**
 - **Hands-Free Dictation:** dictate without holding the key (a lock appears in the HUD); press right ⌥
   once to finish.
 - **Paste Last Dictation / Recent Dictations:** paste again, e.g. if the cursor was in the wrong field.
-- **Language:** detect automatically, or pin Deutsch / English.
-- **Microphone:** "Automatic" uses the system input but skips Bluetooth headsets in favor of the
+- **Vocabulary…** and **Settings…** (⌘,) open the OpenFlow window. While a vault scan runs, the menu
+  bar icon shows a dot and the menu's second line shows its progress; new terms waiting for a review
+  show up there too.
+
+The OpenFlow window has a page each for General, Dictation, Transcription and Vocabulary:
+- **Language** (Dictation): detect automatically, or pin Deutsch / English.
+- **Microphone** (Dictation): "Automatic" uses the system input but skips Bluetooth headsets in favor of the
   built-in mic. Opening a headset mic switches it to low-quality call audio (worse transcripts, mono
   music) and takes long enough to clip your first word. You can also pick any device explicitly.
-- **Keep Mic Ready for 30 s** (off by default): after a dictation the mic stays open briefly, so the
+- **Keep the mic ready for 30 s** (Dictation, off by default): after a dictation the mic stays open briefly, so the
   next one starts instantly with 300 ms of pre-roll. A closed mic needs ~100–200 ms to deliver audio,
   which can clip a first word spoken together with the key press. With this off, the orange mic
   indicator is only on while you dictate.
-- **Cancel Speaker Echo While Transcribing** (on by default), see below.
-- **Sounds**, **Add Space After Text**, **Launch at Login**.
+- **Cancel speaker echo** (Transcription, on by default), see below. The Transcription page also has
+  Start / Stop and the transcripts folder (change or open it).
+- **Sounds**, **Launch at login** (General), **Add a space after the text** (Dictation).
 - "um" is only treated as a filler in English, because it's a real German word ("um zehn Uhr").
 
 ### Formatting while you speak
@@ -80,6 +88,67 @@ with no added latency:
   "wir haben drei Themen," becomes "Wir haben drei Themen:", and a sentence after the last item
   starts a new paragraph.
 - **Layout commands:** "new line" / "neue Zeile" / "Zeilenumbruch" and "new paragraph" / "neuer Absatz".
+
+### Vocabulary
+OpenFlow listens for the words you use: colleagues' names, acronyms, product and project names.
+- **Connect once:** on the Vocabulary page, Connect Vault lists the vaults Obsidian knows; "Choose
+  Folder…" takes any folder of Markdown notes. The polish LLM (Gemma 4 E2B) reads every note and lists
+  the people, organizations, projects, products, acronyms and jargon in it (~1 s per note). Rules keep
+  it honest: a name must appear in the note word for word, takes the note's spelling, and job titles,
+  ticket keys, file names and words the recognizer already knows ("Python", "Inbox") are dropped.
+  OpenFlow's own transcripts are skipped, so the recognizer's mistakes don't become vocabulary. The
+  vault card shows the progress, and a notification says how many terms it learned.
+- **One model for everything** (`asr/bench_llm.py`, October 2026): Gemma 4 E2B passed all 16 cleanup
+  cases at ~130 ms, where Qwen 3.5 and larger Gemma/Nemotron models translated a segment or took 2–6×
+  as long. For the vault scan Qwen 3.5 4B finds more names (86 % vs. 60 % on hand-labelled notes) but
+  would be a second ~3 GB download; `sweep.py --model mlx-community/Qwen3.5-4B-MLX-4bit` uses it anyway.
+- **It keeps itself up to date:** when notes change, OpenFlow rescans while it's idle (at most every
+  30 minutes, and at launch) at background priority. Only changed notes are read again, so a rescan
+  usually takes a second or two. A scan pauses while you dictate or transcribe. Rescan on the vault
+  card runs at full speed and always reports back with a notification.
+- **Review new terms:** after a scan, "N new terms from your vault · Review…" lists them with
+  checkboxes; untick what doesn't belong and press Done. OpenFlow already listens for new terms before
+  you review them.
+- **The Vocabulary page** lists every term with "yours" or "vault". Type to search; press Return to add
+  what you typed. Removing a vault term puts it on the Ignore list, so the next scan doesn't bring it
+  back. The domain line ("logistics IT and data analytics") helps the transcript cleanup.
+- **Or edit the file:** everything lives in `~/Documents/OpenFlow/Vocabulary.md`, which you can edit in
+  any editor (or in Obsidian). Changes apply to the next dictation:
+  ```markdown
+  Domain: logistics IT and data analytics
+
+  ## Terms
+  - ACME
+  - pull request (heard as: pool request)
+
+  ## People
+  - Lena
+
+  ## Ignore
+  - Helper
+
+  <!-- openflow:vault:start … -->   ← rewritten by each vault scan; move a line above to keep it
+  ```
+- **The vault is only read**, and nothing leaves your Mac.
+
+How the list is used, at three points:
+1. **While decoding**, the recognizer gets a small bonus for tokens that start a vocabulary term at a
+   word start, and a larger one once a couple of letters match (shallow fusion with a character trie,
+   so it doesn't matter how the model splits the word). This works in dictation too, adds no
+   measurable time, and invented nothing in silence or noise in the benchmark.
+2. **After decoding**, spellings are normalized: "data garage" and "Datagarage" become "Data
+   Garage", "E T L" becomes "ETL", and "(heard as: …)" aliases are replaced. Terms that are ordinary
+   words ("CoP" vs. "the cop") are left alone.
+3. **In transcription mode**, the polish LLM gets the domain and the ~15 terms that resemble something
+   in the segment.
+
+On the benchmark (64 TTS clips in German and English, `asr/bench_vocab.py`), terms come out right
+57 % of the time instead of 36 % (45 % with the spelling fixes alone), sentences without terms don't
+get worse, and nothing is invented in silence or noise. With a few hundred terms from a real vault
+loaded the gain is the same.
+Why not retrain the model on the vocabulary? A vault has text, not audio of you saying the words; TTS
+audio would teach the model TTS voices; retraining takes hours, would have to be redone whenever your
+notes change, and can cost general accuracy. Biasing applies a change on the next dictation.
 
 ### Transcription mode
 For meetings: transcribe a stretch of a call without recording the whole thing. With headphones, your
@@ -133,6 +202,9 @@ OpenFlow.app (Swift, menu bar)                    asr/server.py (Python sidecar)
   to flush.
 - Transcription mode's system audio runs concurrently with the mic, so it gets a second decoder set
   (loaded on first use, ~2.4 GB). With the polish model, transcription mode uses ~8 GB of GPU memory.
+- `--vocabulary FILE` (the app passes `~/Documents/OpenFlow/Vocabulary.md`, or `""` when it's off) is
+  re-read at the start of a session when it changed; `--no-boost` keeps only the spelling fixes and the
+  glossary, `--boost-start`/`--boost-strength` tune the bonus (default 1 and 3 logits).
 - `--language de-DE` pins the language for every session; the app's Language menu does the same per dictation.
 - Output is limited to Latin script. In auto mode the language tag only arrives at the end of the first
   sentence, and until then the first words could come out in Devanagari, Hebrew or CJK (80 % of the
@@ -151,7 +223,11 @@ OpenFlow.app (Swift, menu bar)                    asr/server.py (Python sidecar)
 | `open -n build/OpenFlow.app --args --mictest` | Capture 1 s from each input device, write chunk counts and start latency to `/tmp/openflow-mictest.txt` (runs with the app's mic permission) |
 | `build/OpenFlow.app/Contents/MacOS/OpenFlow --demo` | Loop a fake dictation through the HUD (design work, no mic) |
 | `build/OpenFlow.app/Contents/MacOS/OpenFlow --transcript-demo` | Loop a fake meeting through the transcription panel |
-| `cd asr && uv run polish.py "so the the build is uh twenty percent faster"` | Run the polish LLM on a segment |
+| `cd asr && uv run polish.py "so the the build is uh twenty percent faster"` | Run the polish LLM on a segment (with a sample glossary) |
+| `cd asr && uv run sweep.py --vault ~/notes --out /tmp/Vocabulary.md` | Learn a vocabulary from a vault (`--no-llm`: rules only) |
+| `cd asr && uv run bench_vocab.py [--vocabulary FILE] [--show]` | Term recall and damage to ordinary speech, boost off vs. on |
+| `cd asr && uv run bench_llm.py mlx:<hf id> ollama:<tag> [--task sweep --vault … --gold …]` | Compare LLMs on transcript polish and vault extraction, with the production prompts |
+| `build/OpenFlow.app/Contents/MacOS/OpenFlow --vocabulary-demo [FILE]` | The OpenFlow window on a copy of a vocabulary file (`OPENFLOW_DEMO_PAGE=General` for another page) |
 | `swift scripts/make-icon.swift app/Resources/AppIcon.icns` | Regenerate the app icon |
 
 `samples/` holds two clips made with macOS `say` (voices Anna and Samantha).

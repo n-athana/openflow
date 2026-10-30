@@ -12,6 +12,7 @@ enum Settings {
             "trailingSpace": true,
             "keepMicWarm": false,  // the orange mic dot lingering after dictating looks like spying
             "cancelEcho": true,
+            "useVocabulary": true,
         ])
     }
 
@@ -57,5 +58,26 @@ enum Settings {
     static var transcriptsFolder: URL {
         get { d.string(forKey: "transcriptsFolder").map { URL(fileURLWithPath: $0, isDirectory: true) } ?? defaultTranscriptsFolder }
         set { d.set(newValue.path, forKey: "transcriptsFolder") }
+    }
+
+    /// Names, acronyms and jargon the recognizer should get right (format: asr/vocab.py).
+    static let vocabularyFile = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Documents/OpenFlow/Vocabulary.md")
+
+    /// Bias the recognizer toward the vocabulary and fix its spellings.
+    static var useVocabulary: Bool {
+        get { d.bool(forKey: "useVocabulary") }
+        set { d.set(newValue, forKey: "useVocabulary") }
+    }
+
+    /// The Obsidian vault (or any Markdown folder) the vocabulary is learned from; only ever read.
+    static var vault: URL? {
+        get { d.string(forKey: "vault").map { URL(fileURLWithPath: $0, isDirectory: true) } }
+        set { d.set(newValue?.path, forKey: "vault") }
+    }
+
+    static var lastVaultScan: Date? {
+        get { d.object(forKey: "lastVaultScan") as? Date }
+        set { d.set(newValue, forKey: "lastVaultScan") }
     }
 }

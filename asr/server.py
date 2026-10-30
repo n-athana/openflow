@@ -9,6 +9,7 @@ Client -> server frames: 1 byte type + 4 byte big-endian length + payload
     b"X"  cancel session: flush silently
     b"P"  polish a transcript segment with the local LLM (payload: JSON {"id": 7, "text": "..."};
           empty text only loads the model)
+The vocabulary file (--vocabulary, see vocab.py) is re-read at the start of a session when it changed.
 Server -> client: newline-delimited JSON. "session" counts the S frames on this connection from 1.
     {"type": "ready"}
     {"type": "partial", "session": 3, "text": "...", "lang": "de-DE"}
@@ -34,6 +35,8 @@ import torch
 from transformers import AutoModelForRNNT, AutoProcessor
 from transformers.generation.streamers import BaseStreamer
 
+import vocab
+from boost import Booster, attach
 from polish import MODEL_ID as POLISH_MODEL, Polisher
 
 MODEL_ID = "nvidia/nemotron-3.5-asr-streaming-0.6b"
@@ -52,14 +55,19 @@ class LiveStreamer(BaseStreamer):
     spoken stays invisible until the following word starts.
     """
 
-    def __init__(self, tokenizer, timeout: float):
+    def __init__(self, tokenizer, timeout: float, boost=None):
         self.tokenizer = tokenizer
         self.tokens: list[int] = []
         self.queue: queue.Queue[str | None] = queue.Queue()
         self.timeout = timeout
+        self.boost = boost  # vocabulary match state, advanced before the next decoder step
 
     def put(self, value):
-        self.tokens.extend(value.reshape(-1).tolist())
+        new = value.reshape(-1).tolist()
+        if self.boost:
+            for t in new:
+                self.boost.step(t)
+        self.tokens.extend(new)
         self.queue.put(self.tokenizer.decode(self.tokens, skip_special_tokens=False))
 
     def end(self):
@@ -76,12 +84,16 @@ class Engine:
     model object, so one instance can't serve two concurrent streams."""
 
     def __init__(
-        self, device: str, lookahead: int, final_lookahead: int, language: str, dtype: torch.dtype, latin_only: bool
+        self, device: str, lookahead: int, final_lookahead: int, language: str, dtype: torch.dtype, latin_only: bool,
+        vocabulary: str = "", boost: dict | None = None,
     ):
         self.device = device
         self.language = language
         self.dtype = dtype
         self.latin_only = latin_only
+        self.vocab_path, self.boost = vocabulary, boost  # boost: Booster settings, None = off
+        self.vocab, self.booster, self.vocab_mtime = vocab.Vocabulary(), None, None
+        self.on_vocabulary = []  # called with the new Vocabulary after a reload
         self.lookahead, self.final_lookahead = lookahead, final_lookahead
         # Metal asserts when two threads use the GPU at once (decoders, model loads, the polish LLM):
         # everything takes turns. Decoders hold it per chunk.
@@ -109,6 +121,7 @@ class Engine:
             p.model = model.to(self.device).eval()
             if self.latin_only:
                 log.info("blocked %d non-Latin tokens", block_non_latin(p))
+        attach(p)
         # A new session can start while the previous one's decoder is still flushing; a second
         # generate() on the same model would overwrite (and then delete) the first one's state.
         p.in_use = threading.Lock()
@@ -125,6 +138,30 @@ class Engine:
                 log.info("loaded decoder set %d", len(self.sets) - 1)
             return self.sets[index]
 
+    def refresh_vocabulary(self):
+        """Re-reads the vocabulary file if it changed since the last session (one stat)."""
+        if not self.vocab_path:
+            return
+        try:
+            mtime = os.stat(self.vocab_path).st_mtime
+        except OSError:
+            mtime = None
+        if mtime == self.vocab_mtime:
+            return
+        self.vocab_mtime = mtime
+        self.vocab = vocab.load(self.vocab_path)
+        if self.boost is not None:
+            t = time.perf_counter()
+            cfg = self.live.model.config
+            self.booster = Booster(
+                self.live.tokenizer, [term.text for term in self.vocab.terms], cfg.vocab_size, cfg.blank_token_id,
+                self.device, self.dtype, **self.boost,
+            ) if self.vocab.terms else None
+            log.info("vocabulary: %d terms, %d boosted (%.0f ms)", len(self.vocab.terms),
+                     len(self.booster.terms) if self.booster else 0, (time.perf_counter() - t) * 1000)
+        for listener in self.on_vocabulary:
+            listener(self.vocab)
+
     def warm_up(self):
         s = Session(self, self.language, lambda *_: None)
         s.push(np.zeros(self.sr, dtype=np.int16).tobytes())
@@ -138,6 +175,8 @@ class Session:
     def __init__(self, engine: Engine, language: str, emit, decoder_set: int = 0):
         self.e = engine
         self.live, self.final = engine.decoders(decoder_set)
+        engine.refresh_vocabulary()
+        self.vocab, self.booster = engine.vocab, engine.booster
         self.language = language
         self.emit = emit
         self.audio = np.zeros(0, dtype=np.float32)
@@ -209,15 +248,20 @@ class Session:
         with self.e.gpu:
             first = self._features(p, audio[: p.num_samples_first_audio_chunk], True)
         first_features = first.input_features[:, : p.num_mel_frames_first_audio_chunk, :]
-        streamer = LiveStreamer(p.tokenizer, timeout=30)
+        boost = self.booster.state() if self.booster else None
+        streamer = LiveStreamer(p.tokenizer, timeout=30, boost=boost)
         errors = []
 
         def generate():
             try:
                 with p.in_use, self.e.gpu, torch.inference_mode():  # in_use first: never wait on it holding the GPU
-                    p.model.generate(
-                        **{**first, "input_features": self._feature_stream(p, first_features), "streamer": streamer}
-                    )
+                    p.boost = boost  # only once in_use is ours: the previous session may still be flushing
+                    try:
+                        p.model.generate(
+                            **{**first, "input_features": self._feature_stream(p, first_features), "streamer": streamer}
+                        )
+                    finally:
+                        p.boost = None
             except Exception as exc:  # surface to the client instead of hanging the streamer
                 errors.append(exc)
                 streamer.end()
@@ -229,11 +273,11 @@ class Session:
             tags = LANG_TAG.findall(raw)
             lang = tags[-1] if tags else lang
             if on_update:
-                on_update(clean(raw), lang)
+                on_update(self.vocab.normalize(clean(raw)), lang)
         gen.join()
         if errors:
             raise errors[0]
-        return clean(raw), lang
+        return self.vocab.normalize(clean(raw)), lang
 
     def _run_live(self):
         last = None
@@ -360,13 +404,22 @@ def main():
     ap.add_argument("--polish-model", default=POLISH_MODEL, help="MLX model that polishes transcription segments")
     ap.add_argument("--latin-only", action=argparse.BooleanOptionalAction, default=True,
                     help="only emit Latin-script text (default); --no-latin-only for Greek, Cyrillic, ...")
+    ap.add_argument("--vocabulary", default=vocab.DEFAULT_PATH, help='vocabulary Markdown file; "" = none')
+    ap.add_argument("--boost", action=argparse.BooleanOptionalAction, default=True,
+                    help="bias the decoder toward vocabulary terms (default); --no-boost keeps aliases and glossary")
+    ap.add_argument("--boost-start", type=float, default=1.0, help="logit bonus for a term's first characters")
+    ap.add_argument("--boost-strength", type=float, default=3.0, help="logit bonus once a term is under way")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
     dtype = torch.float32 if args.fp32 or args.device == "cpu" else torch.float16
-    engine = Engine(args.device, args.lookahead, args.final_lookahead, args.language, dtype, args.latin_only)
+    boost = {"start": args.boost_start, "boost": args.boost_strength} if args.boost else None
+    engine = Engine(args.device, args.lookahead, args.final_lookahead, args.language, dtype, args.latin_only,
+                    args.vocabulary, boost)
     engine.warm_up()
     polisher = Polisher(engine.gpu, args.polish_model)
+    polisher.set_vocabulary(engine.vocab)  # warm-up already loaded it
+    engine.on_vocabulary.append(polisher.set_vocabulary)
 
     os.makedirs(os.path.dirname(args.socket), exist_ok=True)
     if os.path.exists(args.socket):
