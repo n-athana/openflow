@@ -55,7 +55,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         )
     ))
     private var scanWatch: AnyCancellable?
-    private lazy var onboarding = OnboardingWindow(model: appModel) { [weak self] in self?.applyShortcuts() }
+    private lazy var onboarding = OnboardingWindow(
+        model: appModel,
+        applyShortcuts: { [weak self] in self?.applyShortcuts() },
+        connectVault: { [weak self] in self?.startVault($0) },
+        pickVaultFolder: { [weak self] in self?.pickVaultFolder() }
+    )
 
     /// A vault scan pauses whenever OpenFlow is listening, so it never slows recognition down.
     private var state = State.idle {
@@ -558,12 +563,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     private func connectVault(_ url: URL) {
-        vocabulary.ensureFile()
-        sweeper.connect(url)
+        startVault(url)
         mainWindow.show(.vocabulary)  // the scan's progress shows there
     }
 
+    /// Connects without opening the window, for the setup guide.
+    private func startVault(_ url: URL) {
+        vocabulary.ensureFile()
+        sweeper.connect(url)
+    }
+
     private func chooseVaultFolder() {
+        pickVaultFolder().map(connectVault)
+    }
+
+    private func pickVaultFolder() -> URL? {
         let panel = NSOpenPanel()
         panel.title = "Connect a Vault"
         panel.message = "Choose an Obsidian vault or any folder of Markdown notes. OpenFlow only reads it."
@@ -571,8 +585,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         NSApp.activate()
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        connectVault(url)
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        return url
     }
 
     private func setUseVocabulary(_ on: Bool) {

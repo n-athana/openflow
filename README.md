@@ -54,7 +54,9 @@ On first launch a **setup guide** walks you through it:
    to paste, Input Monitoring for the shortcut. System Audio is optional, for meeting
    transcripts. Each one turns green once you allow it.
 2. **Your dictation key**: right ⌥ unless you pick another.
-3. **Try it** in a text field right there.
+3. **Your words**, optional: connect an Obsidian vault (or any folder of Markdown notes) so names
+   and acronyms from your notes come out right. Skip it if you don't use one.
+4. **Try it** in a text field right there.
 
 You can open the guide again any time: Settings → General → Setup guide.
 
@@ -129,8 +131,8 @@ with ordinary sentences unaffected.
 </p>
 
 - **General:** what you've done so far (words dictated, meeting time transcribed, typing time saved;
-  only the totals are kept, never the text), your shortcuts (dictation key, transcription,
-  hands-free, cancel), sounds, launch at login.
+  only the totals are kept, never the text), sounds, launch at login.
+- **Shortcuts:** the dictation key, transcription, hands-free and cancel.
 - **Dictation:** language (automatic, Deutsch or English) and microphone. "Automatic" prefers the
   built-in mic over a Bluetooth headset, which would otherwise switch to low-quality call audio.
 - **Transcription:** the transcripts folder and echo removal for speakers.

@@ -118,7 +118,8 @@ func runOnboardingDemo(step: Int) {
     Settings.registerDefaults()
     let model = AppModel()
     model.status = "ASR: ready"
-    let window = OnboardingWindow(model: model, step: step) {}
+    let window = OnboardingWindow(model: model, step: step, applyShortcuts: {}, connectVault: { _ in },
+                                  pickVaultFolder: { nil })
     retainedOnboardingDemo = window
     window.show()
 }

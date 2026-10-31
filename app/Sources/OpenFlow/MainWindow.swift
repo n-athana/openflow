@@ -5,11 +5,12 @@ import SwiftUI
 /// State the OpenFlow window shows; the app delegate keeps it current.
 final class AppModel: ObservableObject {
     enum Page: String, CaseIterable, Identifiable {
-        case general = "General", dictation = "Dictation", transcription = "Transcription", vocabulary = "Vocabulary"
+        case general = "General", shortcuts = "Shortcuts", dictation = "Dictation", transcription = "Transcription", vocabulary = "Vocabulary"
         var id: String { rawValue }
         var symbol: String {
             switch self {
             case .general: return "slider.horizontal.3"
+            case .shortcuts: return "keyboard"
             case .dictation: return "mic"
             case .transcription: return "text.bubble"
             case .vocabulary: return "character.book.closed"
@@ -131,6 +132,7 @@ extension AppModel.Page {
     var subtitle: String {
         switch self {
         case .general: return "How to talk to OpenFlow, and the app itself."
+        case .shortcuts: return "The keys for dictating, transcribing and cancelling."
         case .dictation: return "Hold a key, talk, let go: the text lands where your cursor is."
         case .transcription: return "Meetings as Markdown, written while you talk: you and the other side."
         case .vocabulary: return "Names, acronyms and project words OpenFlow should get right."
@@ -161,6 +163,7 @@ private struct MainView: View {
             Group {
                 switch model.page {
                 case .general: PageScroll(page: .general) { GeneralPage(model: model, actions: actions) }
+                case .shortcuts: PageScroll(page: .shortcuts) { ShortcutsGroup(model: model, actions: actions) }
                 case .dictation: PageScroll(page: .dictation) { DictationPage(actions: actions) }
                 case .transcription: PageScroll(page: .transcription) { TranscriptionPage(model: model, actions: actions) }
                 case .vocabulary: VocabularyPage(store: store, sweeper: sweeper, actions: actions.vocabulary)
@@ -275,7 +278,6 @@ private struct GeneralPage: View {
         VStack(alignment: .leading, spacing: 26) {
             StatsCard(model: model)
             HowToCard(model: model)
-            ShortcutsGroup(model: model, actions: actions)
             SettingsGroup(title: "Speech model") {
                 SettingRow(title: "Recognizer", detail: "NVIDIA Nemotron, on this Mac's GPU. Nothing goes to the cloud.") {
                     HStack(spacing: 8) {
@@ -439,7 +441,6 @@ private struct ShortcutsGroup: View {
 
     var body: some View {
         SettingsGroup(
-            title: "Shortcuts",
             footer: model.hotkeyActive ? "Click a shortcut, then press the keys. Combinations need ⌘, ⌥ or ⌃."
                 : "Shortcuts don't work yet: allow Input Monitoring and Accessibility (Setup guide), then restart OpenFlow.",
             footerStyle: model.hotkeyActive ? nil : Brand.emberText

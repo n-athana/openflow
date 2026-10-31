@@ -135,7 +135,7 @@ offscreen renders, never from a screen region, which can catch whatever else is 
 | `cd asr && uv run sweep.py --vault ~/notes --out /tmp/Vocabulary.md` | Learn a vocabulary from a vault (`--no-llm`: rules only) |
 | `cd asr && uv run bench_vocab.py [--vocabulary FILE] [--show]` | Term recall and damage to ordinary speech, boost off vs. on |
 | `cd asr && uv run bench_llm.py mlx:<hf id> ollama:<tag> [--task sweep --vault … --gold …]` | Compare LLMs on transcript polish and vault extraction, with the production prompts |
-| `build/OpenFlow.app/Contents/MacOS/OpenFlow --onboarding-demo [STEP]` | The setup guide, from step 0–3 |
+| `build/OpenFlow.app/Contents/MacOS/OpenFlow --onboarding-demo [STEP]` | The setup guide, from step 0–4 |
 | `build/OpenFlow.app/Contents/MacOS/OpenFlow --vocabulary-demo [FILE]` | The OpenFlow window on a copy of a vocabulary file (`OPENFLOW_DEMO_PAGE=General` for another page) |
 | `swift scripts/make-icon.swift app/Resources/AppIcon.icns` | Regenerate the app icon |
 | `swift scripts/make-banner.swift docs/images/banner.png` | Regenerate the README banner |

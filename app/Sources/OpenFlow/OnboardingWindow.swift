@@ -2,13 +2,14 @@ import AppKit
 import SwiftUI
 
 /// The first-run guide: what OpenFlow does, the permissions it needs (one at a time, each with
-/// the reason), the dictation key, and a field to try it. Opens on first launch and from
-/// Settings → General → Setup Guide.
+/// the reason), the dictation key, optionally a vault to learn words from, and a field to try it.
+/// Opens on first launch and from Settings → General → Setup Guide.
 final class OnboardingWindow {
     private let window: NSWindow
     private var closeObserver: NSObjectProtocol?
 
-    init(model: AppModel, step: Int = 0, applyShortcuts: @escaping () -> Void) {
+    init(model: AppModel, step: Int = 0, applyShortcuts: @escaping () -> Void,
+         connectVault: @escaping (URL) -> Void, pickVaultFolder: @escaping () -> URL?) {
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 640, height: 580),
             styleMask: [.titled, .closable, .fullSizeContentView],
@@ -21,7 +22,8 @@ final class OnboardingWindow {
         window.backgroundColor = Brand.nsCanvas
         window.isReleasedWhenClosed = false
         let host = NSHostingView(rootView: OnboardingView(
-            model: model, step: step, applyShortcuts: applyShortcuts, onDone: { [weak self] in self?.window.close() }
+            model: model, step: step, applyShortcuts: applyShortcuts, connectVault: connectVault,
+            pickVaultFolder: pickVaultFolder, onDone: { [weak self] in self?.window.close() }
         ))
         host.sizingOptions = []
         window.contentView = host
@@ -49,16 +51,22 @@ final class OnboardingWindow {
 private struct OnboardingView: View {
     @ObservedObject var model: AppModel
     var applyShortcuts: () -> Void
+    var connectVault: (URL) -> Void
+    var pickVaultFolder: () -> URL?
     var onDone: () -> Void
     @State private var step: Int
+    @State private var vault = Settings.vault
 
-    init(model: AppModel, step: Int, applyShortcuts: @escaping () -> Void, onDone: @escaping () -> Void) {
+    init(model: AppModel, step: Int, applyShortcuts: @escaping () -> Void, connectVault: @escaping (URL) -> Void,
+         pickVaultFolder: @escaping () -> URL?, onDone: @escaping () -> Void) {
         self.model = model
         self.applyShortcuts = applyShortcuts
+        self.connectVault = connectVault
+        self.pickVaultFolder = pickVaultFolder
         self.onDone = onDone
         _step = State(initialValue: step)
     }
-    private let steps = ["Welcome", "Permissions", "Shortcut", "Try it"]
+    private let steps = ["Welcome", "Permissions", "Shortcut", "Your words", "Try it"]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -67,6 +75,7 @@ private struct OnboardingView: View {
                 case 0: welcome
                 case 1: PermissionsStep(model: model)
                 case 2: ShortcutStep(applyShortcuts: applyShortcuts)
+                case 3: VaultStep(connected: $vault, connectVault: connectVault, pickVaultFolder: pickVaultFolder)
                 default: TryStep(model: model)
                 }
             }
@@ -86,7 +95,7 @@ private struct OnboardingView: View {
                     .padding(.leading, 4)
                 Spacer()
                 if step > 0 { Button("Back") { step -= 1 }.buttonStyle(.quiet) }
-                Button(step == steps.count - 1 ? "Done" : step == 0 ? "Get Started" : "Continue") {
+                Button(step == steps.count - 1 ? "Done" : step == 0 ? "Get Started" : step == 3 && vault == nil ? "Skip" : "Continue") {
                     if step == steps.count - 1 { onDone() } else { step += 1 }
                 }
                 .keyboardShortcut(.defaultAction)
@@ -252,9 +261,64 @@ private struct ShortcutStep: View {
                       systemImage: "info.circle")
                     .font(.system(size: 11.5)).foregroundStyle(.secondary)
             }
-            Text("You can change this and the other shortcuts any time in Settings → General.")
+            Text("You can change this and the other shortcuts any time in Settings → Shortcuts.")
                 .font(.system(size: 11.5)).foregroundStyle(.tertiary)
         }
+    }
+}
+
+/// Optional: an Obsidian vault (or any Markdown folder) to learn names and acronyms from.
+private struct VaultStep: View {
+    @Binding var connected: URL?
+    var connectVault: (URL) -> Void
+    var pickVaultFolder: () -> URL?
+    private let known = VaultSweeper.knownVaults()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            StepTitle(title: "Your words",
+                      text: "Optional. Connect your Obsidian vault and OpenFlow learns the names, acronyms and project "
+                        + "words in your notes, so it spells them right. The vault is only read; nothing leaves your Mac.")
+            SettingsGroup {
+                ForEach(known, id: \.self) { v in
+                    row(v.name, symbol: connected == v.url ? "largecircle.fill.circle" : "circle",
+                        selected: connected == v.url) { connect(v.url) }
+                }
+                row(known.isEmpty ? "Choose a folder…" : "Another folder…", symbol: "folder", selected: false) {
+                    if let url = pickVaultFolder() { connect(url) }
+                }
+            }
+            if let connected {
+                Label("Connected to \(VaultSweeper.name(of: connected)). The first scan runs in the background and "
+                      + "can take a few minutes; the terms show up in Settings → Vocabulary.", systemImage: "checkmark.circle.fill")
+                    .font(.system(size: 11.5)).foregroundStyle(.secondary)
+            } else {
+                Text("No Obsidian? Skip this. Any folder of Markdown notes works too, now or later in Settings → Vocabulary.")
+                    .font(.system(size: 11.5)).foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    private func connect(_ url: URL) {
+        guard url != connected else { return }
+        connectVault(url)
+        connected = url
+    }
+
+    private func row(_ title: String, symbol: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: symbol)
+                    .foregroundStyle(selected ? AnyShapeStyle(Brand.ember) : AnyShapeStyle(.tertiary))
+                Text(title).font(.system(size: 13, weight: .medium))
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 38)
+            .background(selected ? Brand.ember.opacity(0.07) : .clear)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
