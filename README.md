@@ -14,10 +14,6 @@
   <img alt="German and English" src="https://img.shields.io/badge/speaks-DE%20%C2%B7%20EN-2BA89C?style=flat-square">
 </p>
 
-<p align="center">
-  <img src="docs/images/dictation.png" alt="The OpenFlow HUD showing a German sentence as it is spoken" width="88%">
-</p>
-
 ## Why OpenFlow
 - **Works in every app.** Slack, mail, your browser, an AI chat, a code editor: wherever the cursor is.
 - **You see it as you speak.** A small glass HUD at the bottom of the screen shows the words live, and
@@ -63,6 +59,10 @@ You can open the guide again any time: Settings → General → Setup guide.
 
 ## Everyday use
 ### Dictate
+<p align="center">
+  <img src="docs/images/dictation.png" alt="The OpenFlow HUD showing a German sentence as it is spoken" width="88%">
+</p>
+
 **Hold right ⌥**, talk, let go. The text appears where your cursor is.
 - **Esc** while holding cancels; nothing is pasted.
 - Pressing another key with ⌥ (like ⌥L for @) still types the character, as it always did.
