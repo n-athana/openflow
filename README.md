@@ -74,6 +74,8 @@ You can open the guide again any time: Settings → General → Setup guide.
   and "neuer Absatz" / "new paragraph" for layout.
 
 ### Transcribe a meeting
+<img src="docs/images/transcription.png" alt="The transcript panel with You and Them" width="38%" align="right">
+
 **Double-tap right ⌥** to start, double-tap again to stop.
 - The panel on the right edge of the screen shows **You** (your microphone) and **Them** (whatever
   your Mac plays: the call).

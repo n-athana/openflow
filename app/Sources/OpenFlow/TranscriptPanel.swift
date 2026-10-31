@@ -77,9 +77,24 @@ private struct TranscriptView: View {
     @ObservedObject var model: TranscriptModel
     var onStop: () -> Void
     var onClose: () -> Void
+    /// Offscreen rendering (README images): no scroll view, which ImageRenderer can't draw.
+    var still = false
     @State private var following = true
 
     var body: some View {
+        if still {
+            // Glass can't be drawn offscreen; a light frosted surface stands in for it.
+            panel
+                .background(RoundedRectangle(cornerRadius: 26, style: .continuous).fill(Color(white: 0.97).opacity(0.9)))
+                .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous).strokeBorder(.white.opacity(0.5)))
+                .shadow(color: .black.opacity(0.35), radius: 24, y: 10)
+                .environment(\.colorScheme, .light)
+        } else {
+            panel.glass(in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+        }
+    }
+
+    private var panel: some View {
         VStack(spacing: 0) {
             header
                 .padding(.horizontal, 18)
@@ -92,7 +107,6 @@ private struct TranscriptView: View {
                 .padding(.vertical, 10)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .glass(in: RoundedRectangle(cornerRadius: 26, style: .continuous))
         .animation(.smooth(duration: 0.3), value: model.finishing)
         .animation(.smooth(duration: 0.3), value: model.ended)
     }
@@ -194,6 +208,14 @@ private struct TranscriptView: View {
                     .foregroundStyle(.tertiary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if still {
+            VStack(alignment: .leading, spacing: 16) {
+                Spacer(minLength: 0)
+                ForEach(blocks) { BlockView(block: $0) }
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 16)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
         } else {
             ScrollViewReader { proxy in
                 ScrollView {
@@ -290,4 +312,40 @@ private struct RecordingDot: View {
             }
             .frame(width: 22, height: 22)
     }
+}
+
+/// `OpenFlow --render-panel out.png`: the panel in the middle of a meeting, rendered offscreen over
+/// the demo backdrop for the README. Nothing is shown on screen and nothing is captured from it.
+@MainActor func renderTranscriptPreview(to url: URL) {
+    let model = TranscriptModel()
+    let now = Date()
+    model.started = now.addingTimeInterval(-754)
+    model.level = 0.035
+    model.themLevel = 0.0005
+    let lines: [(Speaker, String, TranscriptSegment.Stage)] = [
+        (.you, "Okay, lass uns kurz den Status zum Release durchgehen.", .polished),
+        (.them, "Yes, so the pull request is merged and QA starts tomorrow at 9.", .polished),
+        (.them, "We still need sign-off from security, though.", .polished),
+        (.you, "Gut, dann schieben wir das Deployment auf Donnerstag um 10 Uhr.", .polished),
+        (.them, "Works for me. Can you send the summary to the team after the call?", .final),
+        (.you, "Mach ich, ich schicke sie euch direkt nach dem", .live),
+    ]
+    model.segments = lines.enumerated().map { i, line in
+        TranscriptSegment(id: i + 1, speaker: line.0, start: now.addingTimeInterval(Double(i - lines.count) * 25),
+                          text: line.1, stage: line.2)
+    }
+    let view = ZStack {
+        DemoBackdrop()
+        TranscriptView(model: model, onStop: {}, onClose: {}, still: true)
+            .frame(width: 400, height: 640)
+    }
+    .frame(width: 560, height: 700)
+    let renderer = ImageRenderer(content: view)
+    renderer.scale = 2
+    guard let image = renderer.nsImage, let tiff = image.tiffRepresentation,
+          let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else {
+        print("render failed"); return
+    }
+    try? png.write(to: url)
+    print("wrote \(url.path)")
 }

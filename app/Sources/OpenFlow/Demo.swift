@@ -8,7 +8,6 @@ func runOverlayDemo() {
         + "erstens das Budget, zweitens die Roadmap und drittens das Hiring. Danke euch!")
         .split(separator: " ").map(String.init)
     retainedDemo = overlay
-    showDemoBackdrop { f in NSRect(x: f.midX - 470, y: f.minY, width: 940, height: 300) }
 
     func play() {
         overlay.show()
@@ -37,10 +36,6 @@ func runTranscriptDemo() {
     let model = TranscriptModel()
     let panel = TranscriptPanel(model: model)
     retainedTranscriptDemo = (model, panel)
-    showDemoBackdrop { f in
-        let width = min(max(CGFloat(UserDefaults.standard.double(forKey: "transcriptPanelWidth")), 400), f.width / 2)
-        return NSRect(x: f.maxX - width - 250, y: f.minY, width: width + 250, height: f.height)
-    }
     let script: [(Speaker, String, String)] = [
         (.you, "Okay, lass uns kurz den Status zum Release durchgehen.", "Okay, lass uns kurz den Status zum Release durchgehen."),
         (.them, "Yes so the the pool request is merged and QA starts tomorrow at nine", "Yes, so the pull request is merged and QA starts tomorrow at 9."),
@@ -128,30 +123,8 @@ func runOnboardingDemo(step: Int) {
     window.show()
 }
 
-private var retainedBackdrop: NSWindow?
-
-/// With `OPENFLOW_DEMO_BACKDROP=1`, the HUD and panel demos sit on an opaque, brand-coloured
-/// backdrop window, so a screenshot of that rectangle shows the real glass and nothing else on
-/// screen. Prints the rectangle (top-left origin) for `screencapture -R`.
-private func showDemoBackdrop(_ frame: (NSRect) -> NSRect) {
-    guard ProcessInfo.processInfo.environment["OPENFLOW_DEMO_BACKDROP"] == "1",
-          let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main
-    else { return }
-    let rect = frame(screen.visibleFrame).integral
-    let window = NSWindow(contentRect: rect, styleMask: [.borderless], backing: .buffered, defer: false)
-    window.level = .floating
-    window.isOpaque = true
-    window.ignoresMouseEvents = true
-    window.contentView = NSHostingView(rootView: DemoBackdrop())
-    window.orderFrontRegardless()
-    retainedBackdrop = window
-    let top = NSScreen.screens[0].frame.maxY
-    print("backdrop \(Int(rect.minX)),\(Int(top - rect.maxY)),\(Int(rect.width)),\(Int(rect.height))")
-    fflush(stdout)
-}
-
-/// A calm document on paper with an ember glow, so the glass has something to refract.
-private struct DemoBackdrop: View {
+/// A calm document with an ember glow behind offscreen renders (`--render-panel`).
+struct DemoBackdrop: View {
     var body: some View {
         ZStack {
             LinearGradient(colors: [Color(red: 0.16, green: 0.15, blue: 0.19), Brand.ink], startPoint: .top, endPoint: .bottom)

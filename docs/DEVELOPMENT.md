@@ -119,6 +119,9 @@ its geometry (`MarkGeometry`) is shared by the in-app mark, the menu bar icon, `
 `make-banner.swift`. The HUD and the transcript panel use Liquid Glass on macOS 26 and a blur
 material before.
 
+README images come only from captures of OpenFlow's own window (`screencapture -l <window id>`) or
+offscreen renders, never from a screen region, which can catch whatever else is on screen.
+
 ## Commands
 | Command | What it does |
 |---|---|
@@ -136,6 +139,6 @@ material before.
 | `build/OpenFlow.app/Contents/MacOS/OpenFlow --vocabulary-demo [FILE]` | The OpenFlow window on a copy of a vocabulary file (`OPENFLOW_DEMO_PAGE=General` for another page) |
 | `swift scripts/make-icon.swift app/Resources/AppIcon.icns` | Regenerate the app icon |
 | `swift scripts/make-banner.swift docs/images/banner.png` | Regenerate the README banner |
-| `OPENFLOW_DEMO_BACKDROP=1 …/OpenFlow --demo` (or `--transcript-demo`) | The HUD or panel on an opaque backdrop window; prints its rectangle for `screencapture -R`, so a screenshot shows the real glass and nothing else on screen. Covers part of the screen while it runs |
+| `build/OpenFlow.app/Contents/MacOS/OpenFlow --render-panel out.png` | Render the transcript panel mid-meeting, offscreen, for the README (glass replaced by a frosted surface) |
 
 `samples/` holds two clips made with macOS `say` (voices Anna and Samantha).

@@ -620,6 +620,12 @@ if CommandLine.arguments.contains("--systemaudiotest") {
     exit(0)
 }
 
+if let i = CommandLine.arguments.firstIndex(of: "--render-panel"), let out = CommandLine.arguments.dropFirst(i + 1).first {
+    _ = NSApplication.shared
+    MainActor.assumeIsolated { renderTranscriptPreview(to: URL(fileURLWithPath: out)) }
+    exit(0)
+}
+
 let app = NSApplication.shared
 if CommandLine.arguments.contains("--demo") {
     runOverlayDemo()
