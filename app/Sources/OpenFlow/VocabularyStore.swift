@@ -128,8 +128,10 @@ final class VocabularyStore: ObservableObject {
         set { UserDefaults.standard.set(Array(newValue), forKey: reviewedKey) }
     }
 
-    /// A term that left the file and comes back later counts as new again.
+    /// A term that left the file and comes back later counts as new again. Only for the real file:
+    /// the selftest's and demos' temporary files would otherwise clear the list.
     private func pruneReviewed() {
+        guard url.standardizedFileURL == Settings.vocabularyFile.standardizedFileURL else { return }
         let ids = Set(entries.map(\.id))
         let kept = Self.reviewed.intersection(ids)
         if kept.count != Self.reviewed.count { Self.reviewed = kept }
