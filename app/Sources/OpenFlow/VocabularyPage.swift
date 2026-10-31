@@ -22,7 +22,9 @@ struct VocabularyPage: View {
     @State private var useVocabulary = Settings.useVocabulary
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 16) {
+            PageHeader(title: "Vocabulary", subtitle: AppModel.Page.vocabulary.subtitle)
+                .padding(.bottom, 8)
             VaultCard(sweeper: sweeper, actions: actions)
             if !store.unreviewed.isEmpty && !sweeper.running {
                 reviewBanner
@@ -32,8 +34,11 @@ struct VocabularyPage: View {
             list
             footer
         }
-        .padding(20)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxWidth: 620, maxHeight: .infinity, alignment: .topLeading)
+        .padding(.horizontal, 36)
+        .padding(.top, 50)
+        .padding(.bottom, 22)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { domain = store.domain }
         .onChange(of: store.domain) { domain = store.domain }
         .sheet(isPresented: $reviewing) {
@@ -43,7 +48,7 @@ struct VocabularyPage: View {
 
     private var reviewBanner: some View {
         HStack(spacing: 10) {
-            Image(systemName: "sparkles").foregroundStyle(brand)
+            IconBadge(symbol: "sparkles", size: 30)
             VStack(alignment: .leading, spacing: 1) {
                 Text("\(store.unreviewed.count) new terms from your vault").font(.system(size: 13, weight: .semibold))
                 Text("OpenFlow already listens for them. A quick look keeps the list clean.")
@@ -51,18 +56,17 @@ struct VocabularyPage: View {
             }
             Spacer()
             Button("Review…") { reviewing = true }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.regular)
+                .buttonStyle(.primary)
         }
         .padding(12)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.accentColor.opacity(0.08)))
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Brand.ember.opacity(0.09)))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Brand.ember.opacity(0.25)))
     }
 
     private var domainRow: some View {
         HStack(spacing: 8) {
-            Text("Domain").font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
-            TextField("e.g. logistics IT and data analytics", text: $domain)
-                .textFieldStyle(.roundedBorder)
+            TextField("Your field, e.g. logistics IT and data analytics", text: $domain)
+                .textFieldStyle(WellFieldStyle(icon: "briefcase"))
                 .onSubmit { store.setDomain(domain) }
         }
         .help("What you work on. Helps the transcript cleanup pick the right words. Press Return to save.")
@@ -76,13 +80,15 @@ struct VocabularyPage: View {
     private var searchRow: some View {
         HStack(spacing: 8) {
             TextField("Search, or type a new term and press Return", text: $query)
-                .textFieldStyle(.roundedBorder)
+                .textFieldStyle(WellFieldStyle(icon: "magnifyingglass"))
                 .onSubmit { if !trimmedQuery.isEmpty && !exactMatch { add("Terms") } }
             Menu {
                 ForEach(VocabularyStore.categories, id: \.self) { c in Button("Add to \(c)") { add(c) } }
             } label: {
                 Label("Add", systemImage: "plus")
             } primaryAction: { add("Terms") }
+                .menuStyle(.button)
+                .buttonStyle(.quiet)
                 .fixedSize()
                 .disabled(trimmedQuery.isEmpty || exactMatch)
                 .help("Adds to Terms; the arrow picks a category")
@@ -123,8 +129,9 @@ struct VocabularyPage: View {
             }
             .listStyle(.inset(alternatesRowBackgrounds: false))
             .scrollContentBackground(.hidden)
-            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(.background.opacity(0.5)))
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .background(Brand.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Brand.hairline))
             .frame(minHeight: 140, maxHeight: .infinity)  // scroll in the space left; never size the window
         }
     }
@@ -142,7 +149,7 @@ struct VocabularyPage: View {
                 store.ensureFile()
                 NSWorkspace.shared.open(store.url)
             }
-            .controlSize(.small)
+            .buttonStyle(.quietSmall)
         }
     }
 }
@@ -167,18 +174,17 @@ private struct VaultCard: View {
         VStack(alignment: .leading, spacing: 10) {
             if let vault = Settings.vault {
                 HStack(spacing: 10) {
-                    Image(systemName: "books.vertical.fill")
-                        .font(.system(size: 18))
-                        .foregroundStyle(brand)
-                        .frame(width: 32, height: 32)
+                    IconBadge(symbol: "books.vertical.fill", size: 34)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(VaultSweeper.name(of: vault)).font(.system(size: 14, weight: .semibold))
                         TimelineView(.periodic(from: .now, by: 30)) { _ in
-                            Text(status).font(.system(size: 11)).foregroundStyle(sweeper.failed ? .orange : .secondary)
+                            Text(status).font(.system(size: 11.5))
+                                .foregroundStyle(sweeper.failed ? AnyShapeStyle(Brand.emberText) : AnyShapeStyle(.secondary))
                         }
                     }
                     Spacer()
                     Button { actions.rescan() } label: { Label("Rescan", systemImage: "arrow.clockwise") }
+                        .buttonStyle(.quietSmall)
                         .disabled(sweeper.running)
                     vaultMenu
                 }
@@ -187,15 +193,12 @@ private struct VaultCard: View {
                 }
             } else {
                 HStack(spacing: 10) {
-                    Image(systemName: "books.vertical")
-                        .font(.system(size: 18))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 32, height: 32)
+                    IconBadge(symbol: "books.vertical", size: 34, tint: .secondary)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Learn from your notes").font(.system(size: 14, weight: .semibold))
                         Text("Connect an Obsidian vault: OpenFlow picks up names, acronyms and project words, "
                             + "and keeps them up to date. Your vault is only read; nothing leaves your Mac.")
-                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                            .font(.system(size: 11.5)).foregroundStyle(.secondary)
                             .lineLimit(3)
                     }
                     Spacer()
@@ -204,7 +207,8 @@ private struct VaultCard: View {
             }
         }
         .padding(14)
-        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.quaternary.opacity(0.6)))
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Brand.surface))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Brand.hairline))
     }
 
     @ViewBuilder private var progress: some View {
@@ -244,6 +248,9 @@ private struct VaultCard: View {
         } label: {
             if Settings.vault == nil { Text("Connect Vault") } else { Image(systemName: "ellipsis") }
         }
+        .menuStyle(.button)
+        .buttonStyle(Settings.vault == nil ? AnyButtonStyle(.primary) : AnyButtonStyle(.quietSmall))
+        .menuIndicator(Settings.vault == nil ? .visible : .hidden)
         .fixedSize()
     }
 }
@@ -257,7 +264,7 @@ private struct EntryRow: View {
     var body: some View {
         HStack(spacing: 8) {
             if isNew {
-                Circle().fill(Color.accentColor).frame(width: 6, height: 6).help("Not reviewed yet")
+                Circle().fill(Brand.ember).frame(width: 6, height: 6).help("Not reviewed yet")
             }
             Text(entry.text).font(.system(size: 13))
             if !entry.aliases.isEmpty {
@@ -267,7 +274,9 @@ private struct EntryRow: View {
             Spacer(minLength: 4)
             Text(entry.source == .mine ? "yours" : "vault")
                 .font(.system(size: 10, weight: .semibold, design: .rounded))
-                .foregroundStyle(entry.source == .mine ? AnyShapeStyle(brand) : AnyShapeStyle(.secondary))
+                .foregroundStyle(entry.source == .mine ? AnyShapeStyle(Brand.emberText) : AnyShapeStyle(.secondary))
+                .padding(.horizontal, 6).padding(.vertical, 1)
+                .background(Capsule().fill(entry.source == .mine ? AnyShapeStyle(Brand.ember.opacity(0.12)) : AnyShapeStyle(Brand.well)))
             Button { onRemove(entry) } label: {
                 Image(systemName: "minus.circle.fill").font(.system(size: 13))
             }
@@ -291,7 +300,7 @@ private struct ReviewSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
-                Text("Review \(entries.count) new terms").font(.system(size: 15, weight: .semibold))
+                Text("Review \(entries.count) new terms").font(.display(20))
                 Text("Untick anything that isn't a name, product or term you use. Unticked terms go to Ignore, "
                     + "so the next scan won't bring them back.")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
@@ -313,21 +322,27 @@ private struct ReviewSheet: View {
                 }
             }
             .listStyle(.inset)
+            .scrollContentBackground(.hidden)
+            .background(Brand.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Brand.hairline))
             .frame(minHeight: 320)
             HStack {
                 Text(removing.isEmpty ? "Keeping all" : "Removing \(removing.count)")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
                 Spacer()
-                Button("Later", action: onDone).keyboardShortcut(.cancelAction)
+                Button("Later", action: onDone).keyboardShortcut(.cancelAction).buttonStyle(.quiet)
                 Button("Done") {
                     store.finishReview(of: entries, removing: removing)
                     onDone()
                 }
                 .keyboardShortcut(.defaultAction)
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.primary)
             }
         }
-        .padding(20)
-        .frame(width: 440, height: 560)
+        .padding(22)
+        .frame(width: 460, height: 580)
+        .background(Brand.canvas)
+        .tint(Brand.ember)
     }
 }

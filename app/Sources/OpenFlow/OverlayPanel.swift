@@ -98,11 +98,6 @@ final class OverlayPanel {
     }
 }
 
-let brand = LinearGradient(
-    colors: [Color(red: 0.36, green: 0.27, blue: 0.96), Color(red: 0.55, green: 0.24, blue: 0.93), Color(red: 0.98, green: 0.36, blue: 0.55)],
-    startPoint: .topLeading, endPoint: .bottomTrailing
-)
-
 private struct OverlayView: View {
     static let maxLines = 8
     @ObservedObject var model: OverlayModel
@@ -147,7 +142,7 @@ private struct OverlayView: View {
                 if let lang = model.lang {
                     Text(lang.prefix(2).uppercased())
                         .font(.system(size: 13, weight: .heavy, design: .rounded))
-                        .foregroundStyle(brand)
+                        .foregroundStyle(Brand.emberText)
                         .frame(width: 42, height: 42)
                         .glass(in: Circle())
                         .glassID("lang", in: glass)
@@ -159,7 +154,7 @@ private struct OverlayView: View {
 
     @ViewBuilder private var transcript: some View {
         if model.text.isEmpty {
-            Text(model.finishing ? "…" : model.locked ? "Hands-free · press ⌥ to finish" : "Listening…")
+            Text(model.finishing ? "…" : model.locked ? "Hands-free · press \(Settings.dictationKey.name) to finish" : "Listening…")
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(.secondary)
                 .transition(.opacity)
@@ -223,7 +218,7 @@ private struct RevealRenderer: TextRenderer {
 struct LevelBars: View {
     var level: Float
     var finishing: Bool
-    var fill = AnyShapeStyle(brand)
+    var fill = AnyShapeStyle(Brand.ember)
     private static let weights: [Double] = [0.45, 0.8, 1.0, 0.7, 0.4]
 
     var body: some View {

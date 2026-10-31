@@ -459,17 +459,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         return i
     }
 
-    /// Template version of the app icon's five-bar waveform; `badge` adds a dot (a scan is running).
+    /// Template version of the mark (three bars and a line); `badge` adds a dot (a scan is running).
     private static func menuBarIcon(badge: Bool) -> NSImage {
         let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { rect in
-            let heights: [CGFloat] = [0.34, 0.62, 1.0, 0.74, 0.42]
-            let w: CGFloat = 2, gap: CGFloat = 1.6, maxH: CGFloat = 13
-            var x = rect.midX - (CGFloat(heights.count) * w + CGFloat(heights.count - 1) * gap) / 2
+            let g = MarkGeometry.rects(in: rect.insetBy(dx: 1.5, dy: 3))
             NSColor.black.setFill()
-            for h in heights {
-                let bh = max(w, maxH * h)
-                NSBezierPath(roundedRect: NSRect(x: x, y: rect.midY - bh / 2, width: w, height: bh), xRadius: w / 2, yRadius: w / 2).fill()
-                x += w + gap
+            for r in g.bars + [g.line] {
+                let radius = min(r.width, r.height) / 2
+                NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius).fill()
             }
             if badge {
                 NSBezierPath(ovalIn: NSRect(x: rect.maxX - 5, y: rect.maxY - 5, width: 5, height: 5)).fill()

@@ -8,6 +8,7 @@ func runOverlayDemo() {
         + "erstens das Budget, zweitens die Roadmap und drittens das Hiring. Danke euch!")
         .split(separator: " ").map(String.init)
     retainedDemo = overlay
+    showDemoBackdrop { f in NSRect(x: f.midX - 470, y: f.minY, width: 940, height: 300) }
 
     func play() {
         overlay.show()
@@ -36,6 +37,10 @@ func runTranscriptDemo() {
     let model = TranscriptModel()
     let panel = TranscriptPanel(model: model)
     retainedTranscriptDemo = (model, panel)
+    showDemoBackdrop { f in
+        let width = min(max(CGFloat(UserDefaults.standard.double(forKey: "transcriptPanelWidth")), 400), f.width / 2)
+        return NSRect(x: f.maxX - width - 250, y: f.minY, width: width + 250, height: f.height)
+    }
     let script: [(Speaker, String, String)] = [
         (.you, "Okay, lass uns kurz den Status zum Release durchgehen.", "Okay, lass uns kurz den Status zum Release durchgehen."),
         (.them, "Yes so the the pool request is merged and QA starts tomorrow at nine", "Yes, so the pull request is merged and QA starts tomorrow at 9."),
@@ -99,7 +104,10 @@ func runVocabularyDemo(file: String?) {
     let store = VocabularyStore(url: url)
     let sweeper = VaultSweeper(asrDir: "")
     let vocabulary = VocabularyActions(connect: { _ in }, chooseFolder: {}, disconnect: {}, rescan: {}, setUseVocabulary: { _ in })
-    let window = MainWindow(model: AppModel(), store: store, sweeper: sweeper, actions: AppActions(
+    let model = AppModel()
+    model.status = "ASR: ready"  // the look of a running app, for design work and screenshots
+    model.hotkeyActive = true
+    let window = MainWindow(model: model, store: store, sweeper: sweeper, actions: AppActions(
         toggleTranscription: {}, restartASR: {}, openLog: {}, chooseTranscriptsFolder: {}, openTranscripts: {},
         setMicrophone: { _ in }, setKeepMicWarm: { _ in }, applyShortcuts: {}, showSetupGuide: {}, vocabulary: vocabulary
     ))
@@ -113,7 +121,50 @@ private var retainedOnboardingDemo: OnboardingWindow?
 /// The first-run guide, starting at `step` (0–3); permissions show this binary's real state.
 func runOnboardingDemo(step: Int) {
     Settings.registerDefaults()
-    let window = OnboardingWindow(model: AppModel(), step: step) {}
+    let model = AppModel()
+    model.status = "ASR: ready"
+    let window = OnboardingWindow(model: model, step: step) {}
     retainedOnboardingDemo = window
     window.show()
+}
+
+private var retainedBackdrop: NSWindow?
+
+/// With `OPENFLOW_DEMO_BACKDROP=1`, the HUD and panel demos sit on an opaque, brand-coloured
+/// backdrop window, so a screenshot of that rectangle shows the real glass and nothing else on
+/// screen. Prints the rectangle (top-left origin) for `screencapture -R`.
+private func showDemoBackdrop(_ frame: (NSRect) -> NSRect) {
+    guard ProcessInfo.processInfo.environment["OPENFLOW_DEMO_BACKDROP"] == "1",
+          let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main
+    else { return }
+    let rect = frame(screen.visibleFrame).integral
+    let window = NSWindow(contentRect: rect, styleMask: [.borderless], backing: .buffered, defer: false)
+    window.level = .floating
+    window.isOpaque = true
+    window.ignoresMouseEvents = true
+    window.contentView = NSHostingView(rootView: DemoBackdrop())
+    window.orderFrontRegardless()
+    retainedBackdrop = window
+    let top = NSScreen.screens[0].frame.maxY
+    print("backdrop \(Int(rect.minX)),\(Int(top - rect.maxY)),\(Int(rect.width)),\(Int(rect.height))")
+    fflush(stdout)
+}
+
+/// A calm document on paper with an ember glow, so the glass has something to refract.
+private struct DemoBackdrop: View {
+    var body: some View {
+        ZStack {
+            LinearGradient(colors: [Color(red: 0.16, green: 0.15, blue: 0.19), Brand.ink], startPoint: .top, endPoint: .bottom)
+            RadialGradient(colors: [Brand.ember.opacity(0.55), .clear], center: .bottomLeading, startRadius: 10, endRadius: 520)
+            RadialGradient(colors: [Brand.tide.opacity(0.35), .clear], center: .topTrailing, startRadius: 10, endRadius: 520)
+            VStack(alignment: .leading, spacing: 14) {
+                ForEach(0..<14, id: \.self) { i in
+                    RoundedRectangle(cornerRadius: 4).fill(.white.opacity(0.07))
+                        .frame(width: [380, 520, 460, 300, 540, 420, 360, 500, 280, 470, 410, 520, 330, 450][i], height: 9)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(40)
+        }
+    }
 }

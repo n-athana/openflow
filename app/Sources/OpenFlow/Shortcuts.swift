@@ -141,12 +141,21 @@ struct ShortcutRecorder: View {
     var body: some View {
         HStack(spacing: 6) {
             if let warning {
-                Text(warning).font(.system(size: 10)).foregroundStyle(.orange)
+                Text(warning).font(.system(size: 10.5, weight: .medium)).foregroundStyle(Brand.emberText)
             }
             Button(action: toggle) {
+                let set = shortcut != nil && !recording
                 Text(recording ? "Type the shortcut…" : shortcut?.display ?? placeholder)
-                    .frame(minWidth: 110)
+                    .font(.system(size: 12, weight: set ? .semibold : .regular, design: set ? .rounded : .default))
+                    .foregroundStyle(set ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                    .padding(.horizontal, 10)
+                    .frame(minWidth: 130, minHeight: 26)
+                    .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Brand.well))
+                    .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .strokeBorder(recording ? Brand.ember : Brand.hairline, lineWidth: recording ? 1.5 : 1))
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
             .help(recording ? "Press the keys now. Delete removes the shortcut, Esc cancels."
                   : "Click, then press the key combination you want")
             if shortcut != nil && !recording {

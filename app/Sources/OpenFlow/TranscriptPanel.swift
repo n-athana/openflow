@@ -71,7 +71,7 @@ private final class ClickablePanel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
 
-private let them = Color(red: 0.13, green: 0.66, blue: 0.72)
+private let them = Brand.tide
 
 private struct TranscriptView: View {
     @ObservedObject var model: TranscriptModel
@@ -104,9 +104,9 @@ private struct TranscriptView: View {
             if model.ended != nil {
                 Image(systemName: "checkmark.circle.fill")
                     .font(.system(size: 16))
-                    .foregroundStyle(.green)
+                    .foregroundStyle(Brand.ok)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Saved").font(.system(size: 14, weight: .semibold))
+                    Text("Saved").font(.display(16))
                     if let url = model.fileURL {
                         Text(url.deletingPathExtension().lastPathComponent)
                             .font(.system(size: 11))
@@ -126,7 +126,7 @@ private struct TranscriptView: View {
                 RecordingDot(active: !model.finishing)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(model.finishing ? "Finishing…" : "Transcribing")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.display(16))
                     TimelineView(.periodic(from: model.started, by: 1)) { t in
                         Text(Self.elapsed(from: model.started, to: t.date))
                             .font(.system(size: 11).monospacedDigit())
@@ -134,7 +134,7 @@ private struct TranscriptView: View {
                     }
                 }
                 Spacer()
-                meter("You", level: model.level, fill: AnyShapeStyle(brand))
+                meter("You", level: model.level, fill: AnyShapeStyle(Brand.ember))
                     .help("Your microphone")
                 meter("Them", level: model.themLevel, fill: AnyShapeStyle(them))
                     .help("What your Mac plays. Flat while nothing plays; if it stays flat while others talk, allow "
@@ -144,7 +144,7 @@ private struct TranscriptView: View {
                         .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(.white)
                         .frame(width: 30, height: 30)
-                        .background(Circle().fill(Color.red.gradient))
+                        .background(Circle().fill(Brand.ember))
                 }
                 .buttonStyle(.plain)
                 .disabled(model.finishing)
@@ -233,7 +233,7 @@ private struct TranscriptView: View {
             if let notice = model.notice {
                 Label(notice, systemImage: "exclamationmark.triangle.fill")
                     .font(.system(size: 11))
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Brand.warn)
             }
             if model.cancellingEcho && model.ended == nil {
                 Label("Speakers: removing their audio from your mic", systemImage: "speaker.wave.2")
@@ -256,7 +256,7 @@ private struct BlockView: View {
             HStack(spacing: 6) {
                 Text(block.speaker.rawValue)
                     .font(.system(size: 12, weight: .bold, design: .rounded))
-                    .foregroundStyle(block.speaker == .you ? AnyShapeStyle(brand) : AnyShapeStyle(them))
+                    .foregroundStyle(block.speaker == .you ? AnyShapeStyle(Brand.emberText) : AnyShapeStyle(them))
                 Text(TranscriptStore.format(block.start, "HH:mm"))
                     .font(.system(size: 11).monospacedDigit())
                     .foregroundStyle(.tertiary)
@@ -282,9 +282,9 @@ private struct RecordingDot: View {
 
     var body: some View {
         Circle()
-            .fill(active ? Color.red : Color.secondary)
+            .fill(active ? Brand.ember : Color.secondary)
             .frame(width: 10, height: 10)
-            .overlay(Circle().stroke(Color.red.opacity(active ? 0.5 : 0), lineWidth: 2).scaleEffect(pulse ? 2.2 : 1).opacity(pulse ? 0 : 1))
+            .overlay(Circle().stroke(Brand.ember.opacity(active ? 0.5 : 0), lineWidth: 2).scaleEffect(pulse ? 2.2 : 1).opacity(pulse ? 0 : 1))
             .onAppear {
                 withAnimation(.easeOut(duration: 1.4).repeatForever(autoreverses: false)) { pulse = true }
             }

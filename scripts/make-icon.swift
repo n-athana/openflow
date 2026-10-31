@@ -1,60 +1,74 @@
-// Renders OpenFlow's app icon into an .iconset and converts it to .icns.
+// Renders OpenFlow's app icon into an .iconset and converts it to .icns (plus a 1024 px PNG next to it).
+// The mark: three voice bars in ember that end in a line of text, on an ink tile. Keep the
+// geometry in sync with MarkGeometry in app/Sources/OpenFlow/Theme.swift.
 // Usage: swift scripts/make-icon.swift <out.icns>
 import AppKit
 
-let barHeights: [CGFloat] = [0.34, 0.62, 1.0, 0.74, 0.42]  // a spoken-word waveform, not a symmetric EQ
+let barWidth: CGFloat = 0.1345, gap: CGFloat = 0.0793
+let heights: [CGFloat] = [0.517, 0.81, 0.397]
+
+func srgb(_ hex: Int, _ a: CGFloat = 1) -> CGColor {
+    NSColor(srgbRed: CGFloat(hex >> 16 & 255) / 255, green: CGFloat(hex >> 8 & 255) / 255, blue: CGFloat(hex & 255) / 255, alpha: a).cgColor
+}
 
 func renderIcon(px: Int) -> NSBitmapImageRep {
     let rep = NSBitmapImageRep(
         bitmapDataPlanes: nil, pixelsWide: px, pixelsHigh: px, bitsPerSample: 8, samplesPerPixel: 4,
-        hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+        hasAlpha: true, isPlanar: false, colorSpaceName: .calibratedRGB, bytesPerRow: 0, bitsPerPixel: 0
     )!
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
     let ctx = NSGraphicsContext.current!.cgContext
     let s = CGFloat(px) / 1024  // design on a 1024 grid
+    let space = CGColorSpace(name: CGColorSpace.sRGB)!
 
     // macOS icon grid: 824pt rounded square centered, with a soft drop shadow.
     let tile = CGRect(x: 100 * s, y: 100 * s, width: 824 * s, height: 824 * s)
     let shape = CGPath(roundedRect: tile, cornerWidth: 185 * s, cornerHeight: 185 * s, transform: nil)
     ctx.saveGState()
-    ctx.setShadow(offset: CGSize(width: 0, height: -10 * s), blur: 28 * s, color: NSColor.black.withAlphaComponent(0.35).cgColor)
+    ctx.setShadow(offset: CGSize(width: 0, height: -10 * s), blur: 28 * s, color: srgb(0x000000, 0.35))
     ctx.addPath(shape)
-    ctx.setFillColor(NSColor.black.cgColor)
+    ctx.setFillColor(srgb(0x121318))
     ctx.fillPath()
     ctx.restoreGState()
 
+    // ink, a little lighter at the top
     ctx.saveGState()
     ctx.addPath(shape)
     ctx.clip()
-    let space = CGColorSpaceCreateDeviceRGB()
-    let bg = CGGradient(colorsSpace: space, colors: [
-        NSColor(srgbRed: 0.36, green: 0.27, blue: 0.96, alpha: 1).cgColor,  // indigo
-        NSColor(srgbRed: 0.55, green: 0.24, blue: 0.93, alpha: 1).cgColor,  // violet
-        NSColor(srgbRed: 0.98, green: 0.36, blue: 0.55, alpha: 1).cgColor,  // coral
-    ] as CFArray, locations: [0, 0.55, 1])!
-    ctx.drawLinearGradient(bg, start: CGPoint(x: tile.minX, y: tile.maxY), end: CGPoint(x: tile.maxX, y: tile.minY), options: [])
-    // top sheen
-    let sheen = CGGradient(colorsSpace: space, colors: [
-        NSColor.white.withAlphaComponent(0.22).cgColor, NSColor.white.withAlphaComponent(0).cgColor,
-    ] as CFArray, locations: [0, 1])!
-    ctx.drawLinearGradient(sheen, start: CGPoint(x: 0, y: tile.maxY), end: CGPoint(x: 0, y: tile.midY), options: [])
+    let bg = CGGradient(colorsSpace: space, colors: [srgb(0x2A2B33), srgb(0x121318)] as CFArray, locations: [0, 1])!
+    ctx.drawLinearGradient(bg, start: CGPoint(x: 0, y: tile.maxY), end: CGPoint(x: 0, y: tile.minY), options: [])
+    ctx.restoreGState()
+    // a hairline rim so the tile reads on dark docks
+    ctx.saveGState()
+    ctx.addPath(CGPath(roundedRect: tile.insetBy(dx: 1.5 * s, dy: 1.5 * s), cornerWidth: 184 * s, cornerHeight: 184 * s, transform: nil))
+    ctx.setStrokeColor(srgb(0xFFFFFF, 0.09))
+    ctx.setLineWidth(3 * s)
+    ctx.strokePath()
     ctx.restoreGState()
 
-    // waveform bars
-    let barW = 76 * s, gap = 50 * s, maxH = 470 * s
-    let total = CGFloat(barHeights.count) * barW + CGFloat(barHeights.count - 1) * gap
-    var x = tile.midX - total / 2
+    // the mark, 580 wide, centered
+    let u = 580 * s, x0 = tile.midX - u / 2, cy = tile.midY, w = barWidth * u
+    var x = x0
     ctx.saveGState()
-    ctx.setShadow(offset: CGSize(width: 0, height: -6 * s), blur: 18 * s, color: NSColor.black.withAlphaComponent(0.18).cgColor)
-    ctx.setFillColor(NSColor.white.cgColor)
-    for h in barHeights {
-        let bh = max(barW, maxH * h)
-        let bar = CGRect(x: x, y: tile.midY - bh / 2, width: barW, height: bh)
-        ctx.addPath(CGPath(roundedRect: bar, cornerWidth: barW / 2, cornerHeight: barW / 2, transform: nil))
-        x += barW + gap
+    ctx.setShadow(offset: CGSize(width: 0, height: -8 * s), blur: 24 * s, color: srgb(0x000000, 0.3))
+    ctx.beginTransparencyLayer(auxiliaryInfo: nil)
+    let barsTop = cy + heights.max()! * u / 2, barsBottom = cy - heights.max()! * u / 2
+    ctx.saveGState()
+    for h in heights {
+        ctx.addPath(CGPath(roundedRect: CGRect(x: x, y: cy - h * u / 2, width: w, height: h * u),
+                           cornerWidth: w / 2, cornerHeight: w / 2, transform: nil))
+        x += w + gap * u
     }
+    ctx.clip()
+    let ember = CGGradient(colorsSpace: space, colors: [srgb(0xFF7A4D), srgb(0xFF5C38), srgb(0xF2452A)] as CFArray, locations: [0, 0.5, 1])!
+    ctx.drawLinearGradient(ember, start: CGPoint(x: 0, y: barsTop), end: CGPoint(x: 0, y: barsBottom), options: [])
+    ctx.restoreGState()
+    ctx.addPath(CGPath(roundedRect: CGRect(x: x, y: cy - w / 2, width: x0 + u - x, height: w),
+                       cornerWidth: w / 2, cornerHeight: w / 2, transform: nil))
+    ctx.setFillColor(srgb(0xF6F4EF))
     ctx.fillPath()
+    ctx.endTransparencyLayer()
     ctx.restoreGState()
 
     NSGraphicsContext.restoreGraphicsState()
