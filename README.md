@@ -44,9 +44,12 @@ It sets up everything, downloads the speech and cleanup models once (about 5.5 G
 `build/OpenFlow.app` and opens it. To update later, `git pull` and run it again; it skips whatever
 is already done, and macOS keeps your permissions.
 
-<img src="docs/images/setup-guide.png" alt="OpenFlow's setup guide" width="46%" align="right">
-
 On first launch a **setup guide** walks you through it:
+
+<p align="center">
+  <img src="docs/images/setup-guide.png" alt="OpenFlow's setup guide" width="62%">
+</p>
+
 1. **Permissions**, one at a time, each with what it's for. Microphone to hear you, Accessibility
    to paste, Input Monitoring for the shortcut. System Audio is optional, for meeting
    transcripts. Each one turns green once you allow it.
@@ -55,15 +58,14 @@ On first launch a **setup guide** walks you through it:
 
 You can open the guide again any time: Settings → General → Setup guide.
 
-<br clear="right">
-
 ## Everyday use
 ### Dictate
+**Hold right ⌥**, talk, let go. The text appears where your cursor is.
+
 <p align="center">
-  <img src="docs/images/dictation.png" alt="The OpenFlow HUD showing a German sentence as it is spoken" width="88%">
+  <img src="docs/images/dictation.png" alt="The dictation bar showing a German sentence as it is spoken" width="90%">
 </p>
 
-**Hold right ⌥**, talk, let go. The text appears where your cursor is.
 - **Esc** while holding cancels; nothing is pasted.
 - Pressing another key with ⌥ (like ⌥L for @) still types the character, as it always did.
 - **Hands-free:** start it from the menu bar (or give it a shortcut) and talk without holding a key;
@@ -74,9 +76,12 @@ You can open the guide again any time: Settings → General → Setup guide.
   and "neuer Absatz" / "new paragraph" for layout.
 
 ### Transcribe a meeting
-<img src="docs/images/transcription.png" alt="The transcript panel with You and Them" width="38%" align="right">
-
 **Double-tap right ⌥** to start, double-tap again to stop.
+
+<p align="center">
+  <img src="docs/images/transcription.png" alt="The transcript panel with You and Them" width="46%">
+</p>
+
 - The panel on the right edge of the screen shows **You** (your microphone) and **Them** (whatever
   your Mac plays: the call).
 - Each line appears dimmed while it's being recognized, then settles into clean text.
@@ -88,14 +93,13 @@ You can open the guide again any time: Settings → General → Setup guide.
 
 **Always get consent before you transcribe other people.**
 
-<br clear="right">
-
 ### Teach it your words
+Open **Vocabulary** from the menu bar.
+
 <p align="center">
   <img src="docs/images/window-vocabulary.png" alt="The Vocabulary page" width="80%">
 </p>
 
-Open **Vocabulary** from the menu bar.
 - **Connect your Obsidian vault** (or any folder of Markdown notes) once. OpenFlow reads your notes
   and picks out the names, organizations, products, acronyms and jargon in them.
 - **It stays up to date on its own:** when notes change, it rescans quietly while you're not
@@ -118,11 +122,12 @@ Your vault is only ever read, never changed, and nothing leaves your Mac. In our
 with ordinary sentences unaffected.
 
 ### Make it yours
+**Settings…** in the menu bar (⌘,) opens the OpenFlow window.
+
 <p align="center">
   <img src="docs/images/window-general.png" alt="The OpenFlow window, General page" width="80%">
 </p>
 
-**Settings…** in the menu bar (⌘,) opens the OpenFlow window:
 - **General:** your shortcuts (dictation key, transcription, hands-free, cancel), sounds, launch at
   login.
 - **Dictation:** language (automatic, Deutsch or English) and microphone. "Automatic" prefers the
