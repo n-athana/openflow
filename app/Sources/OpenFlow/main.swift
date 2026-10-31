@@ -102,6 +102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             return true
         }
         sweeper.onFinished = { [weak self] in self?.notifyScanned($0) }
+        transcriber.onFinished = { [weak self] in self?.countTranscript() }
         sweeper.start()
         // The menu bar icon shows a dot while a scan runs.
         scanWatch = sweeper.$running.receive(on: DispatchQueue.main).sink { [weak self] running in
@@ -290,6 +291,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         play("Morse")
     }
 
+    /// Adds a finished meeting's length to the General page's total, if anything was said.
+    private func countTranscript() {
+        let m = transcriber.model
+        guard !m.segments.isEmpty, let ended = m.ended else { return }
+        Stats.addTranscription(seconds: ended.timeIntervalSince(m.started))
+        appModel.statsRevision += 1
+    }
+
     private func stopTranscription() {
         guard case .transcribing = state else { return }
         transcriber.stop()
@@ -362,6 +371,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         play("Pop")
         history.insert(text, at: 0)
         history = Array(history.prefix(10))
+        Stats.addDictation(text)
+        appModel.statsRevision += 1
         paste(text)
     }
 

@@ -81,3 +81,26 @@ enum Settings {
         set { d.set(newValue, forKey: "lastVaultScan") }
     }
 }
+
+/// Running totals for the General page: two numbers in UserDefaults, never the text itself.
+enum Stats {
+    private static let d = UserDefaults.standard
+
+    static var words: Int { d.integer(forKey: "statsWords") }
+    static var transcribedSeconds: Int { d.integer(forKey: "statsTranscribedSeconds") }
+    /// Typing the words at ~40 a minute instead of speaking them at ~150.
+    static var savedSeconds: Int { words * 60 / 40 - words * 60 / 150 }
+
+    static func addDictation(_ text: String) {
+        d.set(words + text.split(whereSeparator: \.isWhitespace).count, forKey: "statsWords")
+    }
+
+    static func addTranscription(seconds: TimeInterval) {
+        d.set(transcribedSeconds + Int(seconds.rounded()), forKey: "statsTranscribedSeconds")
+    }
+
+    static func reset() {
+        d.removeObject(forKey: "statsWords")
+        d.removeObject(forKey: "statsTranscribedSeconds")
+    }
+}

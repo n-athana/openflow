@@ -25,6 +25,8 @@ final class AppModel: ObservableObject {
     @Published var hotkeyActive = false
     /// Bumped when shortcuts change, so hints redraw.
     @Published var shortcutsRevision = 0
+    /// Bumped when a dictation or transcript adds to the totals.
+    @Published var statsRevision = 0
 }
 
 /// What the window's pages can ask the app to do (settings with side effects go through here).
@@ -271,6 +273,7 @@ private struct GeneralPage: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 26) {
+            StatsCard(model: model)
             HowToCard(model: model)
             ShortcutsGroup(model: model, actions: actions)
             SettingsGroup(title: "Speech model") {
@@ -303,6 +306,67 @@ private struct GeneralPage: View {
                 }
             }
         }
+    }
+}
+
+/// What OpenFlow has done for you so far: words dictated, meetings transcribed, typing time saved.
+private struct StatsCard: View {
+    @ObservedObject var model: AppModel
+    @State private var confirmReset = false
+
+    var body: some View {
+        let _ = model.statsRevision
+        let empty = Stats.words == 0 && Stats.transcribedSeconds == 0
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("So far").font(.system(size: 11, weight: .semibold)).kerning(0.6).textCase(.uppercase)
+                    .foregroundStyle(.secondary).padding(.leading, 4)
+                Spacer()
+                if !empty {
+                    Button("Reset…") { confirmReset = true }.buttonStyle(.quietSmall)
+                }
+            }
+            Card {
+                HStack(spacing: 0) {
+                    tile(Stats.words.formatted(), "words dictated")
+                    Rectangle().fill(Brand.hairline).frame(width: 1)
+                    tile(Self.duration(Stats.transcribedSeconds), "of meetings transcribed")
+                    Rectangle().fill(Brand.hairline).frame(width: 1)
+                    tile((Stats.savedSeconds >= 60 ? "≈ " : "") + Self.duration(Stats.savedSeconds),
+                         "saved over typing", accent: true)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            if empty {
+                Text("Your first dictation starts the count. Only the totals are kept, never the text.")
+                    .font(.system(size: 11.5)).foregroundStyle(.secondary).padding(.horizontal, 4)
+            }
+        }
+        .confirmationDialog("Reset the totals to zero?", isPresented: $confirmReset) {
+            Button("Reset", role: .destructive) {
+                Stats.reset()
+                model.statsRevision += 1
+            }
+        }
+    }
+
+    private func tile(_ value: String, _ label: String, accent: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(value).font(.display(24)).kerning(-0.3)
+                .foregroundStyle(accent ? AnyShapeStyle(Brand.emberText) : AnyShapeStyle(.primary))
+                .lineLimit(1).minimumScaleFactor(0.7)
+            Text(label).font(.system(size: 11.5)).foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// "0 min", "42 min", "3 h", "6 h 40 min".
+    static func duration(_ seconds: Int) -> String {
+        let minutes = seconds / 60, h = minutes / 60, m = minutes % 60
+        if h == 0 { return "\(minutes) min" }
+        return m == 0 ? "\(h) h" : "\(h) h \(m) min"
     }
 }
 

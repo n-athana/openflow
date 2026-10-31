@@ -128,8 +128,9 @@ with ordinary sentences unaffected.
   <img src="docs/images/window-general.png" alt="The OpenFlow window, General page" width="80%">
 </p>
 
-- **General:** your shortcuts (dictation key, transcription, hands-free, cancel), sounds, launch at
-  login.
+- **General:** what you've done so far (words dictated, meeting time transcribed, typing time saved;
+  only the totals are kept, never the text), your shortcuts (dictation key, transcription,
+  hands-free, cancel), sounds, launch at login.
 - **Dictation:** language (automatic, Deutsch or English) and microphone. "Automatic" prefers the
   built-in mic over a Bluetooth headset, which would otherwise switch to low-quality call audio.
 - **Transcription:** the transcripts folder and echo removal for speakers.
