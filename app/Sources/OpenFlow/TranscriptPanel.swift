@@ -228,8 +228,10 @@ private struct TranscriptView: View {
                 }
                 .defaultScrollAnchor(.bottom)
                 // Follow new text unless the reader scrolled up; scrolling back to the end resumes it.
-                .onScrollPhaseChange { _, phase, context in
-                    guard phase == .idle else { return }
+                // Only the reader's own scrolling decides: right after an automatic scroll the text may
+                // already have grown past the end again, which used to stop the following for good.
+                .onScrollPhaseChange { old, phase, context in
+                    guard phase == .idle, old != .animating else { return }
                     let g = context.geometry
                     following = g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 60
                 }
@@ -237,6 +239,28 @@ private struct TranscriptView: View {
                     guard following else { return }
                     withAnimation(.smooth(duration: 0.3)) { proxy.scrollTo(Self.end, anchor: .bottom) }
                 }
+                // Text that is replaced (final, polished) changes height after the revision did.
+                .onScrollGeometryChange(for: CGFloat.self, of: \.contentSize.height) { _, _ in
+                    if following { proxy.scrollTo(Self.end, anchor: .bottom) }
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if !following {
+                        Button {
+                            following = true
+                            withAnimation(.smooth(duration: 0.3)) { proxy.scrollTo(Self.end, anchor: .bottom) }
+                        } label: {
+                            Label("Latest", systemImage: "arrow.down")
+                                .font(.system(size: 11, weight: .semibold))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(Capsule().fill(.regularMaterial))
+                        }
+                        .buttonStyle(.plain)
+                        .padding(12)
+                        .transition(.opacity)
+                    }
+                }
+                .animation(.smooth(duration: 0.2), value: following)
             }
         }
     }
