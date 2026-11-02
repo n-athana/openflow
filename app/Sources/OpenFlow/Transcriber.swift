@@ -2,8 +2,11 @@ import AppKit
 import SwiftUI
 
 /// Transcription mode: transcribes the mic ("You") and everything the Mac plays ("Them") into the
-/// side panel and a Markdown file. Each stream is cut into short ASR sessions at pauses. A segment
-/// shows the live decoder's text first, then the final decoder's, then the local LLM's cleanup.
+/// side panel and a Markdown file. Each stream is one ASR session for the whole meeting, cut into
+/// segments at pauses: the recognizer keeps its context and language across cuts, only the text is
+/// split (at the exact audio frame, see asr/server.py). A segment shows the live decoder's text
+/// first, then the final text, then the local LLM's cleanup. The final text comes from Parakeet
+/// (FinalPass) once its model is loaded, otherwise from the server's slower, more accurate decoder.
 enum Speaker: String {
     case you = "You", them = "Them"
 }
@@ -12,7 +15,9 @@ struct TranscriptSegment: Identifiable, Equatable {
     enum Stage { case live, final, polished }
     let id: Int
     let speaker: Speaker
-    let start: Date
+    /// First and last word, in the stream's audio time (estimates until the final arrives).
+    var start: Date
+    var end: Date
     var text: String
     var stage: Stage
     /// The recognizer's text before polish; echo detection compares against both.
@@ -64,9 +69,8 @@ final class TranscriptModel: ObservableObject {
     }
 }
 
-/// Cuts a continuous stream into ASR sessions at pauses: sessions stay short (the server keeps a
-/// session's audio in memory) and every finished segment can be polished right away.
-/// Runs on the audio thread.
+/// Cuts a continuous stream into segments at pauses, so every finished segment can be shown as
+/// final and polished right away. Runs on the audio thread.
 private struct Segmenter {
     private var samples = 0
     private var silent = 0
@@ -83,8 +87,9 @@ private struct Segmenter {
         }
     }
 
-    /// Feeds one chunk; true when the session should end after it.
-    mutating func feed(_ pcm: Data) -> Bool {
+    /// Feeds one chunk; at a cut, how many samples before the chunk's end the segment ends: the
+    /// middle of the pause.
+    mutating func feed(_ pcm: Data) -> Int? {
         let rms = Self.rms(pcm), n = pcm.count / 2
         // Noise floor: follows quiet stretches down at once, creeps up slowly during speech.
         floor = rms < floor ? rms : floor + (rms - floor) * 0.005
@@ -95,11 +100,12 @@ private struct Segmenter {
         let seconds = Double(samples) / Double(Self.rate), pause = Double(silent) / Double(Self.rate)
         // Pauses only end a segment that has speech in it; silence just keeps streaming.
         let cut = heard && ((seconds >= 2 && pause >= 0.7) || (seconds >= 20 && pause >= 0.3))
-        guard cut || seconds >= 40 else { return false }
-        samples = 0
-        silent = 0
+        guard cut || seconds >= 40 else { return nil }
+        let back = cut ? silent / 2 : 0
+        samples = back
+        silent = back
         heard = false
-        return true
+        return back
     }
 }
 
@@ -108,7 +114,45 @@ private final class Stream {
     let speaker: Speaker
     let client: ASRClient
     var segmenter = Segmenter()        // audio thread
-    var segments: [Int: Int] = [:]     // ASR session -> segment id (main thread)
+    var samples = 0                    // audio thread: sent in this session
+    var segment = 0                    // audio thread: current segment index
+    var session = 0                    // main thread: this stream's ASR session
+    var started = Date()               // main thread: when the session's audio began
+    var segments: [Int: Int] = [:]     // main thread: segment index -> segment id, until final
+    // Main thread, per segment index: the server's final (text, language, audio times), and
+    // Parakeet's text once it answered (nil inside: it failed). A segment is final with both.
+    var serverFinals: [Int: (text: String, lang: String?, start: Double?, end: Double?)] = [:]
+    var parakeet: [Int: String?] = [:]
+    var awaitingParakeet: Set<Int> = []
+    // The current segment's audio for Parakeet: written on the audio thread, taken at cuts and at stop.
+    private var pcm: [Int16] = []
+    private let lock = NSLock()
+
+    func append(_ data: Data) {
+        lock.lock()
+        data.withUnsafeBytes { pcm.append(contentsOf: $0.bindMemory(to: Int16.self)) }
+        lock.unlock()
+    }
+
+    /// The audio up to `back` samples before the end; the rest starts the next segment.
+    func take(keeping back: Int = 0) -> [Int16] {
+        lock.lock()
+        defer { lock.unlock() }
+        let n = max(0, pcm.count - back)
+        let out = Array(pcm[..<n])
+        pcm.removeFirst(n)
+        return out
+    }
+
+    func reset() {
+        lock.lock()
+        pcm = []
+        lock.unlock()
+        segments = [:]
+        serverFinals = [:]
+        parakeet = [:]
+        awaitingParakeet = []
+    }
 
     init(speaker: Speaker, client: ASRClient) {
         self.speaker = speaker
@@ -129,6 +173,9 @@ final class Transcriber {
     private var nextID = 1
     private var polishing: Set<Int> = []
     private var finishTimeout: DispatchWorkItem?
+    let finalPass = FinalPass()
+    /// This transcription's server sessions run only the live decoder: Parakeet makes the finals.
+    private(set) var liveOnly = false
 
     init(client: ASRClient, socketPath: String, mic: AudioCapture) {
         self.mic = mic
@@ -142,9 +189,11 @@ final class Transcriber {
         model.reset()
         nextID = 1
         polishing = []
-        you.segments = [:]
-        them.segments = [:]
+        you.reset()
+        them.reset()
         you.client.polish(id: 0, text: "")  // load the LLM while the first segment is spoken
+        liveOnly = finalPass.isReady
+        if !liveOnly { finalPass.prepare() }  // takes over from the next segment once loaded
 
         mic.warmSeconds = 0
         mic.onLevel = { [model] level in
@@ -186,8 +235,12 @@ final class Transcriber {
         mic.finish()
         system.onAudio = { _ in }
         system.stop()
+        finishSegment(you, index: you.segment, audio: you.take())
         you.client.end()
-        if them.client.isConnected { them.client.end() }
+        if them.client.isConnected {
+            finishSegment(them, index: them.segment, audio: them.take())
+            them.client.end()
+        }
         model.finishing = true
         model.level = 0
         model.themLevel = 0
@@ -200,8 +253,8 @@ final class Transcriber {
     /// Main-connection events: true if they belonged to transcription.
     func handleMain(_ event: ASRClient.Event) -> Bool {
         switch event {
-        case .partial(let session, _, _), .final(let session, _, _):
-            guard you.segments[session] != nil else { return false }
+        case .partial(let session, _, _, _), .final(let session, _, _, _, _, _):
+            guard session == you.session, session != 0 else { return false }
             handle(event, from: you)
             return true
         case .polished:  // only transcription asks for polish
@@ -219,51 +272,88 @@ final class Transcriber {
         }
     }
 
+    /// --transcribetest: the streams without capture devices, fed by `feedFile`; the Markdown goes to `file`.
+    func startForFiles(them withThem: Bool, file: URL) {
+        model.reset()
+        model.fileURL = file
+        nextID = 1
+        polishing = []
+        liveOnly = finalPass.isReady
+        isActive = true
+        begin(you)
+        if withThem, them.client.isConnected || them.client.connect() { begin(them) }
+    }
+
+    /// --transcribetest: one chunk of 16 kHz mono Int16, from the thread that stands in for the audio thread.
+    func feedFile(_ speaker: Speaker, _ pcm: Data) {
+        feed(speaker == .you ? you : them, pcm)
+    }
+
     // MARK: - Audio thread
 
     private func feed(_ stream: Stream, _ pcm: Data) {
         stream.client.sendAudio(pcm)
-        guard stream.segmenter.feed(pcm) else { return }
-        stream.client.end()
-        begin(stream)
-    }
-
-    /// Starts an ASR session for the next segment. Called on the audio thread at cuts.
-    private func begin(_ stream: Stream) {
-        let session = stream.client.start(language: Settings.language == "auto" ? "" : Settings.language)
-        let start = Date()
+        stream.append(pcm)
+        stream.samples += pcm.count / 2
+        guard let back = stream.segmenter.feed(pcm) else { return }
+        let at = stream.samples - back
+        stream.client.cut(at: at)
+        let audio = stream.take(keeping: back)
+        stream.segment += 1
+        let index = stream.segment
         DispatchQueue.main.async { [self] in
-            let id = nextID
-            nextID += 1
-            stream.segments[session] = id
-            model.segments.append(TranscriptSegment(id: id, speaker: stream.speaker, start: start, text: "", stage: .live))
+            finishSegment(stream, index: index - 1, audio: audio)
+            addSegment(stream, index: index, at: at)
         }
     }
 
     // MARK: - Main thread
 
+    /// Starts the stream's ASR session; it runs until stop().
+    private func begin(_ stream: Stream) {
+        stream.samples = 0
+        stream.segment = 0
+        stream.segmenter = Segmenter()
+        stream.reset()
+        stream.started = Date()
+        let language = Settings.language == "auto" ? "" : Settings.language
+        stream.session = stream.client.start(language: liveOnly ? language + ";live" : language)
+        addSegment(stream, index: 0, at: 0)
+    }
+
+    /// A segment's audio is complete: Parakeet transcribes it, if it's loaded (in a session that
+    /// started before it was, the server's final decoder still runs and covers the earlier segments).
+    private func finishSegment(_ stream: Stream, index: Int, audio: [Int16]) {
+        guard finalPass.isReady, stream.segments[index] != nil, audio.count >= 3_200 else { return }
+        stream.awaitingParakeet.insert(index)
+        finalPass.transcribe(audio) { [weak self] text in
+            stream.awaitingParakeet.remove(index)
+            stream.parakeet[index] = .some(text)
+            self?.finalize(stream, index: index)
+        }
+    }
+
+    private func addSegment(_ stream: Stream, index: Int, at sample: Int) {
+        let id = nextID
+        nextID += 1
+        stream.segments[index] = id
+        let start = stream.started.addingTimeInterval(Double(sample) / 16_000)
+        model.segments.append(TranscriptSegment(id: id, speaker: stream.speaker, start: start, end: start,
+                                                text: "", stage: .live))
+    }
+
     private func handle(_ event: ASRClient.Event, from stream: Stream?) {
         guard let stream else { return }
         switch event {
-        case .partial(let session, let text, let lang):
-            guard let id = stream.segments[session] else { return }
+        case .partial(let session, let segment, let text, let lang):
+            guard session == stream.session, let id = stream.segments[segment] else { return }
+            update(id) { $0.end = max($0.end, Date()) }  // until the final has the audio time
             let clean = withoutEcho(FillerFilter.clean(text, lang: lang), segment: id)
             update(id) { if $0.stage == .live { $0.text = clean } }
-        case .final(let session, let text, let lang):
-            guard let id = stream.segments[session] else { return }
-            stream.segments[session] = nil
-            let heard = FillerFilter.clean(text, lang: lang)
-            let clean = withoutEcho(heard, segment: id)
-            if clean.isEmpty {
-                model.segments.removeAll { $0.id == id }
-            } else {
-                update(id) { $0.text = clean; $0.heard = heard; $0.stage = .final }
-                polishing.insert(id)
-                you.client.polish(id: id, text: clean)
-            }
-            if stream === them { removeEchoes() }  // "You" may have finished first
-            save()
-            finishIfDone()
+        case .final(let session, let segment, let text, let lang, let start, let end):
+            guard session == stream.session, stream.segments[segment] != nil else { return }
+            stream.serverFinals[segment] = (text, lang, start, end)
+            finalize(stream, index: segment)
         case .polished(let id, let text):
             guard id != 0 else { return }
             polishing.remove(id)
@@ -281,14 +371,45 @@ final class Transcriber {
         }
     }
 
+    /// Once the server's final (audio times; text when Parakeet isn't used or failed) and Parakeet's
+    /// answer, if it was asked, are both in.
+    private func finalize(_ stream: Stream, index: Int) {
+        guard let server = stream.serverFinals[index], !stream.awaitingParakeet.contains(index),
+              let id = stream.segments[index] else { return }
+        stream.segments[index] = nil
+        stream.serverFinals[index] = nil
+        let text = (stream.parakeet.removeValue(forKey: index) ?? nil) ?? server.text
+        if let start = server.start, let end = server.end {
+            update(id) {
+                $0.start = stream.started.addingTimeInterval(start)
+                $0.end = stream.started.addingTimeInterval(end)
+            }
+        }
+        let heard = FillerFilter.clean(text, lang: server.lang)
+        let clean = withoutEcho(heard, segment: id)
+        if clean.isEmpty {
+            model.segments.removeAll { $0.id == id }
+        } else {
+            // The previous segment of the same speaker: a sentence split by a pause stays one.
+            let before = model.segments.last { $0.speaker == stream.speaker && $0.id < id && $0.stage != .live }
+            update(id) { $0.text = clean; $0.heard = heard; $0.stage = .final }
+            polishing.insert(id)
+            you.client.polish(id: id, text: clean, before: before?.text ?? "")
+        }
+        if stream === them { removeEchoes() }  // "You" may have finished first
+        save()
+        finishIfDone()
+    }
+
     // MARK: - Echo removal
 
     /// Without headphones the mic also hears the speakers, so what "Them" said shows up again under
     /// "You", often mixed with your own words when you talk over someone. See `stripEcho`.
+    /// Only "Them" segments that overlap in time count (3 s of slack for the two streams' delays).
     private func withoutEcho(_ text: String, segment id: Int) -> String {
         guard let seg = model.segments.first(where: { $0.id == id }), seg.speaker == .you else { return text }
         let theirs = model.segments
-            .filter { $0.speaker == .them && abs($0.start.timeIntervalSince(seg.start)) < 20 }
+            .filter { $0.speaker == .them && $0.start.timeIntervalSince(seg.end) < 3 && seg.start.timeIntervalSince($0.end) < 3 }
             .flatMap { [$0.text, $0.heard] }
         return Self.stripEcho(text, theirs: theirs)
     }
@@ -381,8 +502,10 @@ final class Transcriber {
         finishTimeout = nil
         model.segments.removeAll { $0.text.isEmpty }
         for i in model.segments.indices where model.segments[i].stage == .live { model.segments[i].stage = .final }
-        you.segments = [:]
-        them.segments = [:]
+        you.reset()
+        them.reset()
+        you.session = 0
+        them.session = 0
         polishing = []
         model.finishing = false
         model.ended = Date()

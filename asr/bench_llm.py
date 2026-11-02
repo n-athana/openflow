@@ -114,8 +114,9 @@ def bench_polish(llm, show: bool) -> dict:
     for text, must, must_not, glossary in POLISH_CASES:
         p.vocab = GLOSSARY if glossary else None
         t = time.perf_counter()
-        out = polish.finish(text, llm.ask(polish.messages(text, p.context(text)), max_tokens=polish.max_tokens(text),
-                                          one_line=True))
+        context = p.context(text)
+        out = polish.finish(text, llm.ask(polish.messages(text, context), max_tokens=polish.max_tokens(text),
+                                          one_line=True), context)
         times.append(time.perf_counter() - t)
         ok = all(has(out, m) for m in must) and not any(has(out, m) for m in must_not)
         passed += ok

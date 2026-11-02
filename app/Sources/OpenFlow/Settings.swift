@@ -13,6 +13,7 @@ enum Settings {
             "keepMicWarm": false,  // the orange mic dot lingering after dictating looks like spying
             "cancelEcho": true,
             "useVocabulary": true,
+            "parakeetFinals": true,
         ])
     }
 
@@ -50,6 +51,10 @@ enum Settings {
         get { d.bool(forKey: "cancelEcho") }
         set { d.set(newValue, forKey: "cancelEcho") }
     }
+
+    /// Transcription mode's final text from Parakeet (FinalPass) instead of the streaming decoder.
+    /// No UI: `defaults write dev.openflow.dictation parakeetFinals -bool false` to compare.
+    static var parakeetFinals: Bool { d.bool(forKey: "parakeetFinals") }
 
     static let defaultTranscriptsFolder = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Documents/OpenFlow/Transcripts", isDirectory: true)

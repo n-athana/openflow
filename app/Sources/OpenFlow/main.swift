@@ -82,6 +82,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private let doubleTapWindow: TimeInterval = 0.35
     private var pendingTap: DispatchWorkItem?
     private var history: [String] = []
+    private var lastPing = Date.distantPast
+    private var lastPong = Date()
     private var statusText = "ASR: starting…"
     private var statusItem: NSStatusItem!
 
@@ -99,6 +101,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
         if !client.connect() { sidecar.start() }
         scheduleReconnect()
+        if FinalPass.downloaded {  // ~80 MB once compiled: transcription can start with it right away
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { self.transcriber.finalPass.prepare() }
+        }
 
         UNUserNotificationCenter.current().delegate = self
         sweeper.isBusy = { [weak self] in
@@ -339,13 +344,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             if self.transcriber.handleMain(event) { return }
             switch event {
             case .ready:
+                self.lastPong = Date()
                 self.setStatus("ASR: ready")
-            case .partial(let session, let text, let lang):
+            case .pong:
+                self.lastPong = Date()
+            case .partial(let session, _, let text, let lang):
                 guard session == self.dictationSession else { return }
                 if case .idle = self.state { return }
                 self.overlay.model.update(self.polish(text, lang: lang ?? self.lang))
                 if let lang { self.overlay.model.lang = lang; self.lang = lang }
-            case .final(let session, let text, let lang):
+            case .final(let session, _, let text, let lang, _, _):
                 guard session == self.dictationSession else { return }
                 if case .finishing = self.state {
                     self.state = .idle
@@ -395,11 +403,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private func scheduleReconnect() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
             guard let self else { return }
-            if !self.client.isConnected, !self.client.connect() {
+            if self.client.isConnected {
+                self.checkHealth()
+            } else if !self.client.connect() {
                 self.setStatus("ASR: loading model…")
             }
             self.scheduleReconnect()
         }
+    }
+
+    /// SidecarManager restarts a server that exits; this catches one that hangs: no pong for 20 s.
+    /// Killing it hands over to that restart (and starts one if the server wasn't ours).
+    private func checkHealth() {
+        let now = Date()
+        if now.timeIntervalSince(lastPing) >= 5 {
+            client.ping()
+            lastPing = now
+        }
+        guard now.timeIntervalSince(lastPong) > 20 else { return }
+        NSLog("OpenFlow: ASR server stopped answering, restarting it")
+        lastPong = now
+        if let pid = client.serverPID { kill(pid, SIGKILL) }
+        client.disconnect()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self.sidecar.start() }
     }
 
     // MARK: - Menu bar
@@ -638,6 +664,10 @@ if CommandLine.arguments.contains("--mictest") {
 if let i = CommandLine.arguments.firstIndex(of: "--echotest"), i + 1 < CommandLine.arguments.count {
     runEchoTest(clip: CommandLine.arguments[i + 1])
     exit(0)
+}
+
+if let i = CommandLine.arguments.firstIndex(of: "--transcribetest") {
+    runTranscribeTest(Array(CommandLine.arguments.dropFirst(i + 1)))
 }
 
 if CommandLine.arguments.contains("--systemaudiotest") {

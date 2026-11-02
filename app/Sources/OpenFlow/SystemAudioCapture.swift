@@ -4,6 +4,10 @@ import CoreAudio
 /// Everything the Mac plays (the other side of a call) via a Core Audio process tap, as 16 kHz mono
 /// Int16 chunks like AudioCapture. OpenFlow's own sounds are excluded when CoreAudio knows the process.
 /// The first start asks for "System Audio Recording" permission; until it is granted the tap delivers silence.
+///
+/// The stream keeps wall-clock time, so its segments line up with the mic's: when the tap stalls
+/// (the output device changes, headphones are unplugged), the gap is filled with silence, and the tap
+/// is rebuilt when the default output changes or callbacks stay away.
 final class SystemAudioCapture {
     var onAudio: (Data) -> Void = { _ in }
     /// What start() set up, for --systemaudiotest.
@@ -13,9 +17,86 @@ final class SystemAudioCapture {
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
     private var procID: AudioDeviceIOProcID?
     private let queue = DispatchQueue(label: "openflow.systemaudio")
+    // On `queue`: samples delivered since start(), and when things happened (mach_absolute_time).
+    private var delivered = 0
+    private var started: UInt64 = 0
+    private var lastCallback: UInt64 = 0
+    private var lastRebuild: UInt64 = 0
+    private var watchdog: DispatchSourceTimer?
+    private var outputListener: AudioObjectPropertyListenerBlock?
+    private var outputAddress = address(kAudioHardwarePropertyDefaultOutputDevice)
 
     func start() throws {
         stop()
+        queue.sync {
+            started = mach_absolute_time()
+            delivered = 0
+            lastCallback = started
+            lastRebuild = started
+        }
+        try build()
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 1, repeating: 1)
+        timer.setEventHandler { [weak self] in self?.checkStall() }
+        timer.resume()
+        watchdog = timer
+        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in self?.rebuild("output device changed") }
+        AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &outputAddress, .main, listener)
+        outputListener = listener
+    }
+
+    func stop() {
+        watchdog?.cancel()
+        watchdog = nil
+        if let outputListener {
+            AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &outputAddress, .main, outputListener)
+        }
+        outputListener = nil
+        teardown()
+    }
+
+    /// On `queue`: silence for what the tap didn't deliver; a rebuild if it stays quiet.
+    private func checkStall() {
+        let now = mach_absolute_time()
+        let quiet = Self.seconds(now - lastCallback)
+        if quiet > 0.5 { deliver(nil, now: now) }
+        if quiet > 2, Self.seconds(now - lastRebuild) > 10 {
+            lastRebuild = now
+            DispatchQueue.main.async { self.rebuild("no audio for \(Int(quiet)) s") }
+        }
+    }
+
+    /// On `queue`: `data` (nil from the watchdog), after silence for any gap of more than 0.25 s.
+    private func deliver(_ data: Data?, now: UInt64 = mach_absolute_time()) {
+        let incoming = (data?.count ?? 0) / 2
+        let expected = Int(Self.seconds(now - started) * 16_000)
+        let gap = expected - delivered - incoming - 1_600  // 0.1 s of slack for buffering
+        if gap > 4_000 {
+            onAudio(Data(count: gap * 2))
+            delivered += gap
+        }
+        if let data {
+            lastCallback = now
+            onAudio(data)
+            delivered += incoming
+        }
+    }
+
+    /// On main, like start() and stop().
+    private func rebuild(_ why: String) {
+        guard watchdog != nil else { return }
+        NSLog("OpenFlow: rebuilding the system audio tap (%@)", why)
+        teardown()
+        do { try build() } catch { NSLog("OpenFlow: system audio rebuild failed: %@", error.localizedDescription) }
+    }
+
+    private static func seconds(_ ticks: UInt64) -> Double {
+        var info = mach_timebase_info_data_t()
+        mach_timebase_info(&info)
+        return Double(ticks) * Double(info.numer) / Double(info.denom) / 1e9
+    }
+
+    private func build() throws {
         let tap = CATapDescription(stereoGlobalTapButExcludeProcesses: Self.ownProcess().map { [$0] } ?? [])
         tap.uuid = UUID()
         tap.muteBehavior = .unmuted
@@ -48,7 +129,7 @@ final class SystemAudioCapture {
         }
         converter.downmix = true
         let ratio = pcm16k.sampleRate / format.sampleRate
-        let deliver = { [weak self] (data: Data) in self?.onAudio(data) }
+        let deliver = { [weak self] (data: Data) in self?.deliver(data) }
 
         try check(AudioDeviceCreateIOProcIDWithBlock(&procID, aggregateID, queue) { _, input, _, _, _ in
             guard let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: input, deallocator: nil),
@@ -69,7 +150,7 @@ final class SystemAudioCapture {
         try check(AudioDeviceStart(aggregateID, procID), "start system audio")
     }
 
-    func stop() {
+    private func teardown() {
         if let procID {
             AudioDeviceStop(aggregateID, procID)
             AudioDeviceDestroyIOProcID(aggregateID, procID)
@@ -83,7 +164,7 @@ final class SystemAudioCapture {
 
     private func check(_ status: OSStatus, _ what: String) throws {
         guard status != noErr else { return }
-        stop()
+        teardown()
         throw NSError(domain: NSOSStatusErrorDomain, code: Int(status), userInfo: [NSLocalizedDescriptionKey: "\(what) failed (\(status))"])
     }
 

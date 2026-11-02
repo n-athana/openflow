@@ -109,7 +109,7 @@ def synthesize(out_dir: str) -> list[tuple[str, str, bool, np.ndarray]]:
 def transcribe(engine: server.Engine, audio: np.ndarray, lang: str) -> str:
     result = {}
     s = server.Session(engine, {"de": "de-DE", "en": "en-US"}[lang],
-                       lambda kind, text, _lang: result.__setitem__(kind, text))
+                       lambda kind, text, _lang, **_: result.__setitem__(kind, text))
     s.push(audio.tobytes())
     s.end()
     s.join()

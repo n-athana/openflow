@@ -18,8 +18,8 @@
 - **Works in every app.** Slack, mail, your browser, an AI chat, a code editor: wherever the cursor is.
 - **You see it as you speak.** A small glass HUD at the bottom of the screen shows the words live, and
   the text is pasted the moment you let go.
-- **Private by design.** Speech recognition (NVIDIA Nemotron) and cleanup (Gemma) run on your Mac's
-  GPU. No account, no cloud, no audio stored.
+- **Private by design.** Speech recognition (NVIDIA Nemotron, and Parakeet for meeting transcripts)
+  and cleanup (Gemma) run on your Mac's GPU and Neural Engine. No account, no cloud, no audio stored.
 - **German and English, mixed.** The language is detected each time you speak, so "Das Meeting ist
   um zehn, can you send the deck?" just works.
 - **Clean text.** "Äh", "ähm" and "um" disappear, lists become `1.` `2.` `3.` while you speak, and
@@ -152,16 +152,18 @@ Dictations in quick succession then start instantly; the orange mic dot stays on
 
 **Where are the logs?** `~/Library/Logs/OpenFlow-asr.log`, or Settings → General → Log.
 
-**Does anything go online?** Only the one-time model download during install. After that OpenFlow
-runs offline.
+**Does anything go online?** Only the one-time model downloads: during install, and the meeting
+transcription model (~630 MB) the first time you transcribe. After that OpenFlow runs offline.
 
 ## For developers
 How it works, the benchmarks, every command and the design system:
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## Model licenses
-The models are downloaded from Hugging Face during install and are not part of this repository:
+The models are downloaded from Hugging Face and are not part of this repository:
 [Nemotron 3.5 ASR Streaming 0.6B](https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b) by
-NVIDIA under the OpenMDW-1.1 license, and
+NVIDIA under the OpenMDW-1.1 license,
+[Parakeet Ultra](https://huggingface.co/FluidInference/parakeet-ultra-coreml) (Moondream's post-training
+of NVIDIA's Parakeet TDT 0.6B v3, Core ML build by FluidInference) under CC-BY-4.0, and
 [Gemma 4 E2B](https://huggingface.co/mlx-community/gemma-4-e2b-it-4bit) by Google; see the model
 pages for their terms.

@@ -331,8 +331,9 @@ private struct RecordingDot: View {
         (.you, "Mach ich, ich schicke sie euch direkt nach dem", .live),
     ]
     model.segments = lines.enumerated().map { i, line in
-        TranscriptSegment(id: i + 1, speaker: line.0, start: now.addingTimeInterval(Double(i - lines.count) * 25),
-                          text: line.1, stage: line.2)
+        let start = now.addingTimeInterval(Double(i - lines.count) * 25)
+        return TranscriptSegment(id: i + 1, speaker: line.0, start: start, end: start.addingTimeInterval(20),
+                                 text: line.1, stage: line.2)
     }
     let view = ZStack {
         DemoBackdrop()

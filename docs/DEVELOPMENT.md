@@ -30,10 +30,12 @@ OpenFlow.app (Swift, menu bar)                    asr/server.py (Python sidecar)
  FillerFilter   regex cleanup
  TextFormatter  lists + layout commands, live
  TextInserter   pasteboard swap + ⌘V
- SidecarManager spawns `uv run server.py`, restarts on crash
- Transcriber    transcription mode: segments,  ──▶ 2nd connection, 2nd decoder set ("Them")
+ SidecarManager spawns `uv run server.py`, restarts on crash (and on a hang: no pong for 20 s)
+ Transcriber    transcription mode: one session ──▶ 2nd connection, 2nd decoder set ("Them"),
+                per stream, cut into segments        live decoder only
                 Markdown store                 ──▶ polish.py: Gemma 4 E2B via MLX
- SystemAudioCapture  Core Audio process tap
+ FinalPass      Parakeet Ultra (FluidAudio, Core ML on the Neural Engine): each segment's final text
+ SystemAudioCapture  Core Audio process tap, gaps filled with silence, rebuilt on output changes
  TranscriptPanel     side panel
 ```
 - **Two decoders, one pass each.** The HUD uses 320 ms chunks (`--lookahead 3`, ~20 ms compute per
@@ -46,8 +48,9 @@ OpenFlow.app (Swift, menu bar)                    asr/server.py (Python sidecar)
   and Metal asserts when two threads use the GPU at once (that includes model loads and the MLX
   polish model). Each decoder serves one session at a time; a new session waits for the previous one
   to flush.
-- Transcription mode's system audio runs concurrently with the mic, so it gets a second decoder set
-  (loaded on first use, ~2.4 GB). With the polish model, transcription mode uses ~8 GB of GPU memory.
+- Transcription mode's system audio runs concurrently with the mic, so it gets a second decoder set,
+  loaded on first use (~1.2 GB per decoder). With Parakeet making the finals it only needs the live
+  decoder; the final decoder of a set loads when a session asks for it.
 - `--vocabulary FILE` (the app passes `~/Documents/OpenFlow/Vocabulary.md`, or `""` when it's off) is
   re-read at the start of a session when it changed; `--no-boost` keeps only the spelling fixes and the
   glossary, `--boost-start`/`--boost-strength` tune the bonus (default 1 and 3 logits).
@@ -80,36 +83,82 @@ How the list is used, at three points:
    so it doesn't matter how the model splits the word). This works in dictation too, adds no
    measurable time, and invented nothing in silence or noise in the benchmark.
 2. **After decoding**, spellings are normalized: "data garage" and "Datagarage" become "Data
-   Garage", "E T L" becomes "ETL", and "(heard as: …)" aliases are replaced. Terms that are ordinary
-   words ("CoP" vs. "the cop") are left alone.
+   Garage", "E T L" becomes "ETL", and "(heard as: …)" aliases are replaced. Near misses too, by
+   spelling (Damerau-Levenshtein ≥ 0.75) or by sound (Kölner Phonetik): "Netfora", "Nematron",
+   "Jana Waber". Terms that are ordinary words ("CoP" vs. "the cop"), spans of only common words and
+   single words that are real words ("Gamma") are left alone. Parakeet's finals get the same pass.
 3. **In transcription mode**, the polish LLM gets the domain and the ~15 terms that resemble something
    in the segment.
 
 On the benchmark (64 TTS clips in German and English, `asr/bench_vocab.py`), terms come out right
-57 % of the time instead of 36 % (45 % with the spelling fixes alone), sentences without terms don't
-get worse, and nothing is invented in silence or noise. With a few hundred terms from a real vault
-loaded the gain is the same.
+64 % of the time instead of 36 % (53 % with the spelling fixes alone), sentences without terms don't
+get worse, and nothing is invented in silence or noise. Parakeet, which gets no decoding bonus, gets
+75 % with the spelling fixes (39 % raw). The near-miss matching was tuned on misses from this
+benchmark, so expect less on your own terms.
 Why not retrain the model on the vocabulary? A vault has text, not audio of you saying the words; TTS
 audio would teach the model TTS voices; retraining takes hours, would have to be redone whenever your
 notes change, and can cost general accuracy. Biasing applies a change on the next dictation.
 
 ## Transcription internals
-- Each stream is cut into segments at pauses. A segment appears dimmed while it's being recognized,
-  turns solid when the 1.12 s decoder confirms it, then gets a cleanup pass by
-  [Gemma 4 E2B](https://huggingface.co/mlx-community/gemma-4-e2b-it-4bit) (MLX, ~200 ms): punctuation,
-  stutters, self-corrections, numbers as digits, misheard terms ("pool request" → "pull request").
-  It never translates or answers what was said, and an output much shorter or longer than the input is
-  discarded. It won a 14-case German/English benchmark against Qwen 3.5 2B/4B, Ministral 3 3B and
-  LFM 2.5 1.2B.
+- **One recognizer session per stream** for the whole meeting, cut into segments at pauses (`K`
+  frames). The recognizer keeps its context and detected language across cuts; only the text is split.
+  transformers hands every decoder step to the streamer, blanks included, and each blank is one 80 ms
+  encoder frame, so every token has its audio time: the text splits at the exact frame, a full stop
+  that comes a few frames late stays with its sentence, and segments carry audio times (the Markdown
+  and the You/Them order use them). A 31-minute session decodes as fast at the end as at the start.
+- A segment appears dimmed with the live decoder's text, turns solid with the final text, then gets a
+  cleanup pass by [Gemma 4 E2B](https://huggingface.co/mlx-community/gemma-4-e2b-it-4bit) (MLX,
+  ~200 ms): punctuation, stutters, self-corrections, numbers as digits, misheard terms ("pool request" →
+  "pull request"), with the speaker's previous segment as context. It never translates or answers what
+  was said; an output whose length is off, that loops, whose words mostly aren't in the segment or
+  glossary, or that drops the segment's end is discarded. It won a 14-case German/English benchmark
+  against Qwen 3.5 2B/4B, Ministral 3 3B and LFM 2.5 1.2B.
+- **The final text comes from Parakeet** (`FinalPass.swift`): Moondream's Parakeet Ultra (a post-training
+  of NVIDIA's Parakeet TDT 0.6B v3) as a Core ML model from FluidAudio, on the Neural Engine. It
+  transcribes each finished segment's audio again, ~0.1 s per segment, and makes half the errors of the
+  1.12 s streaming decoder (see the benchmark below). The model (~630 MB) downloads the first time you
+  transcribe; until then, and if it fails, the server's final decoder makes the finals as before. From
+  then on it loads at launch (0.3 s, ~80 MB) and the server runs only the live decoders (`S` payload
+  `;live`). `defaults write dev.openflow.dictation parakeetFinals -bool false` turns it off.
 - **On speakers** the mic also hears the other side. When the Mac plays through its speakers, a
   display, HDMI or AirPlay, the mic runs through macOS voice processing, which removes what the
   speakers play (any app's audio) and keeps your voice, also while you talk over someone. Other apps
-  aren't turned down. As a second line of defense, runs of 3+ words under "You" that "Them" said
-  within 20 s are cut, keeping your own words around them. With headphones neither is needed.
+  aren't turned down. As a second line of defense, runs of 3+ words under "You" that "Them" said in a
+  segment overlapping it in audio time (±3 s) are cut, keeping your own words around them. With
+  headphones neither is needed.
+- The system audio keeps wall-clock time, so "Them" lines up with "You": when the tap stalls (output
+  device change, headphones unplugged) the gap is filled with silence, and the tap is rebuilt when the
+  default output changes or no audio arrives for 2 s.
 - The transcript is written to `YYYY-MM-DD HH-MM.md` in the transcripts folder
   (`~/Documents/OpenFlow/Transcripts` unless changed in Settings) after every finished segment (atomic
   rewrite), so a crash loses at most the segment being spoken. No audio is stored.
 - Toggle from scripts or Shortcuts: post the distributed notification `dev.openflow.toggleTranscription`.
+
+## Benchmark: final text
+`asr/bench_wer.py` on the full FLEURS test sets (862 German, 647 English clips, M5 Pro, November 2026),
+Nemotron exactly as the app runs it (fp16, lookahead 13, auto language, Latin only), Parakeet through
+`scripts/parakeet-bench`, both scored with the same normalizer (lowercase, no punctuation):
+
+| | WER de | WER en | without number clips de / en | long files: seam loss de / en | speed |
+|---|---|---|---|---|---|
+| Nemotron, final decoder (1.12 s) | 10.7 % | 11.8 % | 7.9 % / 9.0 % | +0.4 / −0.1 points | 26× real time (GPU) |
+| Parakeet Ultra (Neural Engine) | **4.5 %** | **5.2 %** | **3.8 % / 4.7 %** | +0.3 / +1.0 points | 144–179× |
+
+"Without number clips" leaves out references with digits, which Nemotron writes as words. "Long files"
+are 12 sentences joined by 0.8 s of silence (~2.5 min), decoded as one session: their WER against the
+same clips one by one. In auto mode Nemotron also returned nothing for 4 English clips (with `en-US`
+pinned it transcribes them); Parakeet had no empty output. Through the whole app (`--transcribetest`,
+3 minutes per side, with cuts, echo filter and polish) the transcript's WER went from 7.8 % to 2.0 %
+(German) and 8.3 % to 4.9 % (English). FLEURS is read speech; meetings will score worse for both.
+
+## Prior art
+Ideas taken from two open-source Mac apps, both MIT-licensed, after reading their code:
+- [Blitztext](https://github.com/cmagnussen/blitztext-app): Parakeet Ultra via FluidAudio as the
+  recognizer, phonetic custom-term correction with a dictionary guard, a system-audio tap watchdog that
+  fills gaps with clock-measured silence, and time-aligned echo removal.
+- [MurmurBee](https://github.com/kai-kaushik/murmurbee): guards that fall back to the raw text when the
+  LLM's output isn't grounded in the input, loops, or drops the end; the previous chunk as context.
+- [FluidAudio](https://github.com/FluidInference/FluidAudio) (Apache-2.0) runs Parakeet on the Neural Engine.
 
 ## Design
 Everything visual comes from [Theme.swift](../app/Sources/OpenFlow/Theme.swift): the palette (ink,
@@ -128,6 +177,9 @@ offscreen renders, never from a screen region, which can catch whatever else is 
 | `cd asr && uv run bench.py ../samples/*.wav` | Real-time factor, per-chunk compute, transcripts |
 | `cd asr && uv run server.py --socket /tmp/t.sock`, then `uv run smoke.py ../samples/de.wav --socket /tmp/t.sock` | Stream a WAV through the server at speaking pace |
 | `build/OpenFlow.app/Contents/MacOS/OpenFlow --selftest` | Filler-filter and formatter test cases |
+| `cd asr && uv run test_segments.py --socket /tmp/t.sock` | One session cut into segments: texts, audio times, a 35 s silence (server running) |
+| `build/OpenFlow.app/Contents/MacOS/OpenFlow --transcribetest /tmp/t.sock you.wav [them.wav] [--no-parakeet]` | Transcription mode on WAV files instead of mic and system audio, 4× real time (server running) |
+| `cd asr && uv run --with pyarrow --with jiwer bench_wer.py prepare FLEURS_DIR DIR`, then `bench_wer.py nemotron DIR`, `swift run -c release --package-path ../scripts/parakeet-bench parakeet-bench DIR`, `bench_wer.py score DIR` | WER of the final text, Nemotron vs. Parakeet (FLEURS `de_de.parquet`, `en_us.parquet` from Hugging Face) |
 | `open -n build/OpenFlow.app --args --mictest` | Capture 1 s from each input device, write chunk counts and start latency to `/tmp/openflow-mictest.txt` (runs with the app's mic permission) |
 | `build/OpenFlow.app/Contents/MacOS/OpenFlow --demo` | Loop a fake dictation through the HUD (design work, no mic) |
 | `build/OpenFlow.app/Contents/MacOS/OpenFlow --transcript-demo` | Loop a fake meeting through the transcription panel |

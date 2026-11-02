@@ -2,12 +2,15 @@ import Foundation
 
 /// Talks to the Python sidecar over its Unix socket (framing documented in asr/server.py).
 final class ASRClient {
-    /// `session` numbers the start() calls on this connection from 1, matching the server's count.
+    /// `session` numbers the start() calls on this connection from 1, matching the server's count;
+    /// `segment` the cut() calls within the session from 0. A final's `start`/`end`: seconds of
+    /// session audio from its first to its last word.
     enum Event {
         case ready
-        case partial(session: Int, text: String, lang: String?)
-        case final(session: Int, text: String, lang: String?)
+        case partial(session: Int, segment: Int, text: String, lang: String?)
+        case final(session: Int, segment: Int, text: String, lang: String?, start: Double?, end: Double?)
         case polished(id: Int, text: String)
+        case pong
         case error(String)
         case disconnected
     }
@@ -17,6 +20,8 @@ final class ASRClient {
     let decoderSet: Int
     var onEvent: (Event) -> Void = { _ in }
     private(set) var isConnected = false
+    /// The server process, from its ready message (`uv run` sits in between, and can't pass on SIGKILL).
+    private(set) var serverPID: pid_t?
 
     private var fd: Int32 = -1
     private let writeQueue = DispatchQueue(label: "openflow.asr.write")
@@ -75,13 +80,18 @@ final class ASRClient {
     }
 
     func sendAudio(_ pcm: Data) { send("A", pcm) }
+    /// Starts the session's next segment at `sample` (counted from the session's first audio sample).
+    func cut(at sample: Int) { send("K", Data(String(sample).utf8)) }
     func end() { send("E") }
     func cancel() { send("X") }
+    /// Answered with `.pong` while the server is responsive.
+    func ping() { send("H") }
 
     /// Asks the server's local LLM to clean up a transcript segment; answers with `.polished(id:)`.
-    /// Empty text only loads the model.
-    func polish(id: Int, text: String) {
-        guard let payload = try? JSONSerialization.data(withJSONObject: ["id": id, "text": text]) else { return }
+    /// `before`: the previous segment, as context. Empty text only loads the model.
+    func polish(id: Int, text: String, before: String = "") {
+        guard let payload = try? JSONSerialization.data(withJSONObject: ["id": id, "text": text, "before": before])
+        else { return }
         send("P", payload)
     }
 
@@ -115,6 +125,10 @@ final class ASRClient {
                 let line = pending[pending.startIndex..<nl]
                 pending.removeSubrange(pending.startIndex...nl)
                 if let event = Self.parse(Data(line)) {
+                    if case .ready = event,
+                       let pid = (try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any])?["pid"] as? Int {
+                        DispatchQueue.main.async { self.serverPID = pid_t(pid) }
+                    }
                     DispatchQueue.main.async { self.onEvent(event) }
                 }
             }
@@ -133,11 +147,15 @@ final class ASRClient {
         let text = obj["text"] as? String ?? ""
         let lang = obj["lang"] as? String
         let session = obj["session"] as? Int ?? 0
+        let segment = obj["segment"] as? Int ?? 0
         switch type {
         case "ready": return .ready
-        case "partial": return .partial(session: session, text: text, lang: lang)
-        case "final": return .final(session: session, text: text, lang: lang)
+        case "partial": return .partial(session: session, segment: segment, text: text, lang: lang)
+        case "final":
+            return .final(session: session, segment: segment, text: text, lang: lang,
+                          start: obj["start"] as? Double, end: obj["end"] as? Double)
         case "polished": return .polished(id: obj["id"] as? Int ?? -1, text: text)
+        case "pong": return .pong
         case "error": return .error(obj["message"] as? String ?? "unknown")
         default: return nil
         }

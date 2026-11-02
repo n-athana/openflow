@@ -58,7 +58,7 @@ func runTranscriptDemo() {
             let words = raw.split(separator: " ").map(String.init)
             let start = t
             DispatchQueue.main.asyncAfter(deadline: .now() + start) {
-                model.segments.append(TranscriptSegment(id: i + 1, speaker: speaker, start: Date(), text: "", stage: .live))
+                model.segments.append(TranscriptSegment(id: i + 1, speaker: speaker, start: Date(), end: Date(), text: "", stage: .live))
             }
             for n in 1...words.count {
                 DispatchQueue.main.asyncAfter(deadline: .now() + start + Double(n) * 0.25) {

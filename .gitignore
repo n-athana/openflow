@@ -2,6 +2,8 @@
 build/
 app/.build/
 app/.swiftpm/
+scripts/parakeet-bench/.build/
+scripts/parakeet-bench/.swiftpm/
 
 # python
 asr/.venv/

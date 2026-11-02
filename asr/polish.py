@@ -79,21 +79,21 @@ class Polisher:
             lines.append("Known terms: " + "; ".join(terms))
         return "\n".join(lines)
 
-    def submit(self, text: str, done):
-        self.jobs.put((text, done))
+    def submit(self, text: str, done, before: str = ""):
+        self.jobs.put((text, before, done))
 
     def _run(self):
         while True:
-            text, done = self.jobs.get()
+            text, before, done = self.jobs.get()
             try:
                 with self.gpu:
-                    out = self.polish(text)
+                    out = self.polish(text, before)
             except Exception:
                 log.exception("polish failed, keeping the raw segment")
                 out = text
             done(out)
 
-    def polish(self, text: str) -> str:
+    def polish(self, text: str, before: str = "") -> str:
         if self.model is None:
             from mlx_lm import load  # imported lazily: dictation-only setups never pay for MLX
 
@@ -103,7 +103,8 @@ class Polisher:
             return text
         from mlx_lm import stream_generate
 
-        prompt = self.tok.apply_chat_template(messages(text, self.context(text)), add_generation_prompt=True,
+        context = self.context(text)
+        prompt = self.tok.apply_chat_template(messages(text, context, before), add_generation_prompt=True,
                                               tokenize=False, enable_thinking=False)
         out = ""
         for r in stream_generate(self.model, self.tok, prompt, max_tokens=max_tokens(text)):
@@ -111,10 +112,12 @@ class Polisher:
             visible = THINK.sub("", out).lstrip()
             if "<think>" not in visible and "\n" in visible:  # one segment = one line
                 break
-        return finish(text, out)
+        return finish(text, out, context)
 
 
-def messages(text: str, context: str = "") -> list[dict]:
+def messages(text: str, context: str = "", before: str = "") -> list[dict]:
+    """`before`: the previous segment, so a sentence split by a pause still reads as one."""
+    context = "\n".join(c for c in (context, f"Previous segment: {before}" if before else "") if c)
     context = f"Context (never output this):\n{context}\n" if context else ""
     return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": f"{context}Segment: {text}\nOutput:"}]
 
@@ -123,14 +126,49 @@ def max_tokens(text: str) -> int:
     return len(text) // 2 + 40
 
 
-def finish(text: str, out: str) -> str:
+def finish(text: str, out: str, context: str = "") -> str:
     """The model's first line, without labels; the input if the output looks off script."""
     out = LABEL.sub("", THINK.sub("", out).strip().split("\n")[0]).strip().strip('"').strip()
     # A cleanup changes length a little; much shorter or longer means it summarized or answered.
     if not out or not 0.5 <= len(out) / len(text) <= 1.5:
-        log.warning("polish output rejected: %r -> %r", text, out)
-        return text
-    return out
+        problem = "length"
+    elif looping(out):
+        problem = "loop"
+    elif not grounded(out, text + " " + context):
+        problem = "invented words"
+    elif dropped_tail(text, out):
+        problem = "dropped the end"
+    else:
+        return out
+    log.warning("polish output rejected (%s): %r -> %r", problem, text, out)
+    return text
+
+
+def stems(text: str) -> list[str]:
+    """Words cut to 4 letters, so inflections and fixed spellings still match; numbers are left
+    out, the polish writes them as digits."""
+    return [w[:4] for w in re.findall(r"\w+", text.lower()) if not any(c.isdigit() for c in w)]
+
+
+def grounded(out: str, source: str) -> bool:
+    """At least 60 % of the output's words come from the segment or the glossary; more new words
+    means the model answered, continued or copied the previous segment."""
+    words, known = stems(out), set(stems(source))
+    return not words or sum(w in known for w in words) / len(words) >= 0.6
+
+
+def dropped_tail(text: str, out: str) -> bool:
+    """Small models sometimes stop early: one of the segment's last three words should still be
+    among the output's last eight."""
+    tail = stems(text)
+    return len(tail) >= 6 and not set(tail[-3:]) & set(stems(out)[-8:])
+
+
+def looping(out: str) -> bool:
+    """The same three words four times in the last forty."""
+    w = re.findall(r"\w+", out.lower())[-40:]
+    grams = [tuple(w[i : i + 3]) for i in range(len(w) - 2)]
+    return any(grams.count(g) >= 4 for g in set(grams))
 
 
 def trigrams(text: str) -> set[str]:

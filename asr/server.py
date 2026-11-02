@@ -3,18 +3,25 @@
 Client -> server frames: 1 byte type + 4 byte big-endian length + payload
     b"C"  choose the decoder set for this connection (payload: b"0", b"1", ...; default 0). A second
           concurrent audio stream (transcription mode's system audio) needs its own models.
-    b"S"  start session (payload: optional language, e.g. b"de-DE"; empty = server default)
+    b"S"  start session (payload: optional language, e.g. b"de-DE"; empty = server default; a suffix
+          b";live" runs only the fast decoder, for a client that makes its own finals)
     b"A"  audio: 16 kHz mono int16 little-endian PCM
-    b"E"  end session: flush and emit final
+    b"K"  cut: start a new segment at this sample of the session (payload: ASCII sample index). The
+          session, its encoder state and its detected language carry on; only the text is split.
+    b"E"  end session: flush and emit the last final
     b"X"  cancel session: flush silently
-    b"P"  polish a transcript segment with the local LLM (payload: JSON {"id": 7, "text": "..."};
-          empty text only loads the model)
+    b"P"  polish a transcript segment with the local LLM (payload: JSON {"id": 7, "text": "...",
+          "before": "previous segment, optional"}; empty text only loads the model)
+    b"H"  health check: answered with a pong from the connection's thread
 The vocabulary file (--vocabulary, see vocab.py) is re-read at the start of a session when it changed.
-Server -> client: newline-delimited JSON. "session" counts the S frames on this connection from 1.
-    {"type": "ready"}
-    {"type": "partial", "session": 3, "text": "...", "lang": "de-DE"}
-    {"type": "final", "session": 3, "text": "...", "lang": "de-DE"}
+Server -> client: newline-delimited JSON. "session" counts the S frames on this connection from 1,
+"segment" the K frames in the session from 0. "start"/"end": seconds of session audio from the
+segment's first to last token (null when it's empty).
+    {"type": "ready", "pid": 4711}   (the server process, so a hung one can be killed)
+    {"type": "partial", "session": 3, "segment": 0, "text": "...", "lang": "de-DE"}
+    {"type": "final", "session": 3, "segment": 0, "text": "...", "lang": "de-DE", "start": 0.4, "end": 2.1}
     {"type": "polished", "id": 7, "text": "..."}
+    {"type": "pong"}
     {"type": "error", "session": 3, "message": "..."}
 """
 
@@ -28,6 +35,7 @@ import socket
 import struct
 import threading
 import time
+from collections import deque
 from threading import Thread
 
 import numpy as np
@@ -48,34 +56,135 @@ NON_LATIN = re.compile(r"[^\W\d_\u0000-\u024F\u1E00-\u1EFF]")
 log = logging.getLogger("openflow-asr")
 
 
-class LiveStreamer(BaseStreamer):
-    """Yields the full decoded transcript after every token.
+FRAME_SAMPLES = 1280  # one encoder frame: 80 ms at 16 kHz (10 ms mel hop x 8 subsampling)
+# The recognizer writes a sentence's full stop (and in auto mode the language tag) a few frames after
+# the last word, which can be past the cut: punctuation this soon after a cut, before any word, still
+# ends the previous segment.
+PUNCT_HOLD = 8  # frames (0.64 s)
 
-    transformers' TextIteratorStreamer holds text back until the next space, so the word being
-    spoken stays invisible until the following word starts.
+
+class LiveStreamer(BaseStreamer):
+    """Yields ("text", segment, raw) after every token, and ("cut", segment, raw, first, last) once the
+    decoder is past a cut, then for the last segment at the end. first/last: encoder frames of the
+    segment's first and last token.
+
+    generate() hands over every decoder step, blanks included, and a blank moves on to the next 80 ms
+    encoder frame: counting them times each token in session audio, which splits the text at cuts
+    exactly. transformers' TextIteratorStreamer would also hold text back until the next space, so
+    the word being spoken stayed invisible until the following word started.
     """
 
-    def __init__(self, tokenizer, timeout: float, boost=None):
+    def __init__(self, tokenizer, blank: int, cuts: list[int], boost=None):
         self.tokenizer = tokenizer
-        self.tokens: list[int] = []
-        self.queue: queue.Queue[str | None] = queue.Queue()
-        self.timeout = timeout
+        self.blank = blank
+        self.cuts = cuts  # cut frames, appended by the session as K frames arrive
+        self.pending: list[tuple[int, int]] = []  # (frame, token) of the current segment
+        self.frame = 0
+        self.segment = 0
+        self.prompt = True
+        self.punct: dict[int, bool] = {}
+        self.queue: queue.Queue = queue.Queue()
         self.boost = boost  # vocabulary match state, advanced before the next decoder step
 
     def put(self, value):
-        new = value.reshape(-1).tolist()
-        if self.boost:
-            for t in new:
+        if self.prompt:  # generate() first passes the decoder's start token
+            self.prompt = False
+            return
+        changed = False
+        for t in value.reshape(-1).tolist():
+            if self.boost:
                 self.boost.step(t)
-        self.tokens.extend(new)
-        self.queue.put(self.tokenizer.decode(self.tokens, skip_special_tokens=False))
+            if t == self.blank:
+                self.frame += 1
+            else:
+                self.pending.append((self.frame, t))
+                changed = True
+        if self._settle() or changed:
+            self.queue.put(("text", self.segment, self._decode(self._visible())))
+
+    def _is_punct(self, token: int) -> bool:
+        if token not in self.punct:
+            piece = LANG_TAG.sub("", self.tokenizer.decode([token], skip_special_tokens=False))
+            self.punct[token] = not any(c.isalnum() for c in piece)
+        return self.punct[token]
+
+    def _split(self, at: int) -> int | None:
+        """Index of the first word token at or after frame `at`, i.e. where the next segment starts."""
+        return next((i for i, (f, t) in enumerate(self.pending) if f >= at and not self._is_punct(t)), None)
+
+    def _visible(self):
+        """The current segment's tokens: not the next segment's words while a cut waits for punctuation."""
+        if self.segment < len(self.cuts) and (i := self._split(self.cuts[self.segment])) is not None:
+            return self.pending[:i]
+        return self.pending
+
+    def _settle(self, force: bool = False) -> bool:
+        """Ends segments whose cut the decoder is past: at the next word after the cut, or once
+        PUNCT_HOLD frames passed without one. A cut can also arrive after the decoder passed it (the
+        live decoder runs ~0.4 s behind the audio, the app cuts 0.35 s into a pause): tokens behind it
+        still move on to the next segment."""
+        moved = False
+        while self.segment < len(self.cuts):
+            at = self.cuts[self.segment]
+            i = self._split(at)
+            if i is None:
+                if self.frame < at + PUNCT_HOLD and not force:
+                    break
+                i = len(self.pending)
+            done, self.pending = self.pending[:i], self.pending[i:]
+            self._emit_cut(done)
+            self.segment += 1
+            moved = True
+        return moved
+
+    def _emit_cut(self, done):
+        words = [f for f, t in done if not self._is_punct(t)]  # a trailing "?" comes ~1 s late
+        first, last = (words[0], words[-1]) if words else (None, None)
+        self.queue.put(("cut", self.segment, self._decode(done), first, last))
+
+    def _decode(self, pairs) -> str:
+        return self.tokenizer.decode([t for _, t in pairs], skip_special_tokens=False)
 
     def end(self):
+        self._settle(force=True)
+        self._emit_cut(self.pending)
+        self.pending = []
         self.queue.put(None)
 
     def __iter__(self):
-        while (text := self.queue.get(timeout=self.timeout)) is not None:
-            yield text
+        # No timeout: nothing is queued while nobody speaks (minutes, when nothing plays on the "Them"
+        # side), and generate() always ends the stream, also when it fails.
+        while (item := self.queue.get()) is not None:
+            yield item
+
+
+class AudioBuffer:
+    """A session's audio as the list of pushed chunks: appending stays cheap for hours (one
+    np.concatenate per push made long sessions quadratic), and audio every decoder is past goes."""
+
+    def __init__(self):
+        self.chunks: deque[np.ndarray] = deque()
+        self.base = 0  # session sample index of chunks[0][0]
+        self.size = 0  # samples pushed so far
+
+    def append(self, samples: np.ndarray):
+        if samples.size:
+            self.chunks.append(samples)
+            self.size += samples.size
+
+    def read(self, start: int, end: int) -> np.ndarray:
+        out, pos = [], self.base
+        for c in self.chunks:
+            if pos >= end:
+                break
+            if pos + c.size > start:
+                out.append(c[max(0, start - pos) : end - pos])
+            pos += c.size
+        return np.concatenate(out) if out else np.zeros(0, np.float32)
+
+    def trim(self, upto: int):
+        while self.chunks and self.base + self.chunks[0].size <= upto:
+            self.base += self.chunks.popleft().size
 
 
 class Engine:
@@ -100,7 +209,7 @@ class Engine:
         self.gpu = threading.Lock()
         self.live = self._decoder(lookahead)
         self.final = self._decoder(final_lookahead) if final_lookahead != lookahead else None
-        self.sets = [(self.live, self.final)]
+        self.sets = [[self.live, self.final]]
         self.sets_lock = threading.Lock()
         fe = self.live.feature_extractor
         self.sr, self.hop, self.n_fft = fe.sampling_rate, fe.hop_length, fe.n_fft
@@ -127,16 +236,22 @@ class Engine:
         p.in_use = threading.Lock()
         return p
 
-    def decoders(self, index: int):
-        """(live, final) decoders for decoder set `index`, loaded on first use (~2 s, ~2.4 GB fp16)."""
-        if index < len(self.sets):  # don't wait while another connection loads a new set
-            return self.sets[index]
+    def decoders(self, index: int, final: bool = True):
+        """(live, final) decoders for decoder set `index`, each loaded on first use (~2 s, ~1.2 GB fp16).
+        final=False: only the live one (final is None), e.g. when the app makes its own finals."""
+        two = self.final_lookahead != self.lookahead
+        if index < len(self.sets) and (self.sets[index][1] or not (final and two)):  # don't wait on a load
+            live, fin = self.sets[index]
+            return live, fin if final else None
         with self.sets_lock:
             while len(self.sets) <= index:
-                final = self._decoder(self.final_lookahead) if self.final_lookahead != self.lookahead else None
-                self.sets.append((self._decoder(self.lookahead), final))
+                self.sets.append([self._decoder(self.lookahead), None])
                 log.info("loaded decoder set %d", len(self.sets) - 1)
-            return self.sets[index]
+            if final and two and not self.sets[index][1]:
+                self.sets[index][1] = self._decoder(self.final_lookahead)
+                log.info("loaded the final decoder of set %d", index)
+            live, fin = self.sets[index]
+            return live, fin if final else None
 
     def refresh_vocabulary(self):
         """Re-reads the vocabulary file if it changed since the last session (one stat)."""
@@ -163,27 +278,31 @@ class Engine:
             listener(self.vocab)
 
     def warm_up(self):
-        s = Session(self, self.language, lambda *_: None)
+        s = Session(self, self.language, lambda *_, **__: None)
         s.push(np.zeros(self.sr, dtype=np.int16).tobytes())
         s.end()
         s.join()
 
 
 class Session:
-    """One push-to-talk utterance. Audio is pushed from the socket thread; each decoder pulls it."""
+    """One push-to-talk utterance, or one stream of transcription mode cut into segments (K frames).
+    Audio is pushed from the socket thread; each decoder pulls it."""
 
-    def __init__(self, engine: Engine, language: str, emit, decoder_set: int = 0):
+    def __init__(self, engine: Engine, language: str, emit, decoder_set: int = 0, live_only: bool = False):
         self.e = engine
-        self.live, self.final = engine.decoders(decoder_set)
+        self.live, self.final = engine.decoders(decoder_set, final=not live_only)
         engine.refresh_vocabulary()
         self.vocab, self.booster = engine.vocab, engine.booster
         self.language = language
         self.emit = emit
-        self.audio = np.zeros(0, dtype=np.float32)
+        self.audio = AudioBuffer()
+        self.cuts: list[int] = []  # encoder frames where segments end; both decoders' streamers read it
+        self.read_from: dict[str, int] = {}  # per decoder: first sample it still needs
         self.cond = threading.Condition()
         self.done = False
         self.cancelled = False
-        self.live_result: tuple[str, str | None] = ("", None)
+        self.lang: str | None = None
+        self.live_texts: dict[int, str] = {}  # segment -> live decoder's text, the final's fallback
         self.live_done = threading.Event()
         self.threads = [Thread(target=self._run_live, daemon=True)]
         if self.final:
@@ -194,13 +313,19 @@ class Session:
     def push(self, pcm: bytes):
         samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
         with self.cond:
-            self.audio = np.concatenate([self.audio, samples])
+            self.audio.append(samples)
             self.cond.notify_all()
+
+    def cut(self, sample: int):
+        """Ends the current segment at `sample` (session audio)."""
+        with self.cond:
+            frame = max(sample // FRAME_SAMPLES, self.cuts[-1] + 1 if self.cuts else 1)
+            self.cuts.append(frame)
 
     def end(self, cancel: bool = False):
         with self.cond:
             self.cancelled = cancel
-            self.audio = np.concatenate([self.audio, np.zeros(int(self.e.flush_seconds * self.e.sr), np.float32)])
+            self.audio.append(np.zeros(int(self.e.flush_seconds * self.e.sr), np.float32))
             self.done = True
             self.cond.notify_all()
 
@@ -208,11 +333,16 @@ class Session:
         for t in self.threads:
             t.join()
 
-    def _wait_for(self, n: int) -> np.ndarray | None:
-        """Block until audio[:n] exists. Returns None once the session ended without enough audio."""
+    def _read(self, who: str, start: int, end: int) -> np.ndarray | None:
+        """Blocks until audio[start:end] exists. None once the session ended without enough audio."""
         with self.cond:
-            self.cond.wait_for(lambda: self.audio.shape[0] >= n or self.done)
-            return self.audio if self.audio.shape[0] >= n else None
+            self.cond.wait_for(lambda: self.audio.size >= end or self.done)
+            if self.audio.size < end:
+                return None
+            self.read_from[who] = start
+            if len(self.read_from) == len(self.threads):
+                self.audio.trim(min(self.read_from.values()))
+            return self.audio.read(start, end)
 
     def _features(self, p, audio: np.ndarray, first: bool):
         return p(
@@ -224,7 +354,7 @@ class Session:
             return_tensors="pt",
         ).to(self.e.device, dtype=self.e.dtype)
 
-    def _feature_stream(self, p, first_features):
+    def _feature_stream(self, who: str, p, first_features):
         """Runs inside generate(), which holds the GPU lock; it is released only while waiting for audio."""
         yield first_features
         mel_idx = p.num_mel_frames_first_audio_chunk
@@ -232,24 +362,26 @@ class Session:
             start = mel_idx * self.e.hop - self.e.n_fft // 2
             self.e.gpu.release()
             try:
-                audio = self._wait_for(start + p.num_samples_per_audio_chunk)
+                audio = self._read(who, start, start + p.num_samples_per_audio_chunk)
             finally:
                 self.e.gpu.acquire()
             if audio is None or self.cancelled:  # free the decoder for the next session right away
                 return
-            yield self._features(p, audio[start : start + p.num_samples_per_audio_chunk], False).input_features
+            yield self._features(p, audio, False).input_features
             mel_idx += p.num_mel_frames_per_audio_chunk
 
-    def _decode(self, p, on_update=None) -> tuple[str, str | None]:
-        """Runs one streaming decoder over the session audio; returns (text, language)."""
-        audio = self._wait_for(p.num_samples_first_audio_chunk)
+    def _decode(self, who: str, p, on_text, on_segment):
+        """Runs one streaming decoder over the session audio: on_text(segment, text) after every
+        token, on_segment(segment, text, start, end) once a segment is complete."""
+        audio = self._read(who, 0, p.num_samples_first_audio_chunk)
         if audio is None or self.cancelled:
-            return "", None
+            on_segment(0, "", None, None)
+            return
         with self.e.gpu:
-            first = self._features(p, audio[: p.num_samples_first_audio_chunk], True)
+            first = self._features(p, audio, True)
         first_features = first.input_features[:, : p.num_mel_frames_first_audio_chunk, :]
         boost = self.booster.state() if self.booster else None
-        streamer = LiveStreamer(p.tokenizer, timeout=30, boost=boost)
+        streamer = LiveStreamer(p.tokenizer, p.model.config.blank_token_id, self.cuts, boost=boost)
         errors = []
 
         def generate():
@@ -258,7 +390,8 @@ class Session:
                     p.boost = boost  # only once in_use is ours: the previous session may still be flushing
                     try:
                         p.model.generate(
-                            **{**first, "input_features": self._feature_stream(p, first_features), "streamer": streamer}
+                            **{**first, "input_features": self._feature_stream(who, p, first_features),
+                               "streamer": streamer}
                         )
                     finally:
                         p.boost = None
@@ -268,47 +401,65 @@ class Session:
 
         gen = Thread(target=generate, daemon=True)
         gen.start()
-        raw, lang = "", None
-        for raw in streamer:
+        for kind, segment, raw, *frames in streamer:
             tags = LANG_TAG.findall(raw)
-            lang = tags[-1] if tags else lang
-            if on_update:
-                on_update(self.vocab.normalize(clean(raw)), lang)
+            self.lang = tags[-1] if tags else self.lang
+            text = self.vocab.normalize(clean(raw))
+            if segment:  # whatever punctuation still slipped past the cut ended the previous one
+                text = text.lstrip(".,;:!?… ")
+            if kind == "text":
+                on_text(segment, text)
+            else:
+                first_f, last_f = frames
+                to_s = lambda f: None if f is None else round(f * FRAME_SAMPLES / self.e.sr, 2)
+                on_segment(segment, text, to_s(first_f), to_s(last_f + 1 if last_f is not None else None))
         gen.join()
         if errors:
             raise errors[0]
-        return self.vocab.normalize(clean(raw)), lang
 
     def _run_live(self):
         last = None
 
-        def on_update(text, lang):
+        def on_text(segment, text):
             nonlocal last
-            if text and not self.cancelled and (text, lang) != last:
-                self.emit("partial", text, lang)
-                last = (text, lang)
+            if text and not self.cancelled and (segment, text, self.lang) != last:
+                self.emit("partial", text, self.lang, segment=segment)
+                last = (segment, text, self.lang)
+
+        def on_segment(segment, text, start, end):
+            self.live_texts[segment] = text
+            if not self.final and not self.cancelled:
+                self.emit("final", text, self.lang, segment=segment, start=start, end=end)
 
         try:
-            self.live_result = self._decode(self.live, on_update)
+            self._decode("live", self.live, on_text, on_segment)
         except Exception as exc:
             log.exception("live decoder failed")
             self.emit("error", str(exc), None)
         finally:
             self.live_done.set()
-        if not self.final and not self.cancelled:
-            self.emit("final", *self.live_result)
 
     def _run_final(self):
+        emitted = set()
+
+        def on_segment(segment, text, start, end):
+            if not text:  # nothing better than the live pass (wait for it only at the very end)
+                if segment >= len(self.cuts):
+                    self.live_done.wait()
+                text = self.live_texts.get(segment, "")
+            emitted.add(segment)
+            if not self.cancelled:
+                self.emit("final", text, self.lang, segment=segment, start=start, end=end)
+
         try:
-            text, lang = self._decode(self.final)
+            self._decode("final", self.final, lambda *_: None, on_segment)
         except Exception:
             log.exception("final decoder failed, falling back to live transcript")
-            text, lang = "", None
-        if not text:  # nothing better than the live pass
             self.live_done.wait()
-            text, lang = self.live_result
-        if not self.cancelled:
-            self.emit("final", text, lang or self.live_result[1])
+            for segment in range(len(self.cuts) + 1):
+                if segment not in emitted and not self.cancelled:
+                    self.emit("final", self.live_texts.get(segment, ""), self.lang, segment=segment,
+                              start=None, end=None)
 
 
 def block_non_latin(p) -> int:
@@ -348,14 +499,14 @@ def serve_client(engine: Engine, polisher: Polisher, conn: socket.socket):
                 pass
 
     def emitter(sid: int):
-        def emit(kind, text, lang):
+        def emit(kind, text, lang, **extra):
             if kind == "error":
                 send({"type": "error", "session": sid, "message": text})
             else:
-                send({"type": kind, "session": sid, "text": text, "lang": lang})
+                send({"type": kind, "session": sid, "text": text, "lang": lang, **extra})
         return emit
 
-    send({"type": "ready"})
+    send({"type": "ready", "pid": os.getpid()})
     session = None
     sessions = 0
     decoder_set = 0
@@ -367,19 +518,28 @@ def serve_client(engine: Engine, polisher: Polisher, conn: socket.socket):
                 break
             if kind == b"C":
                 decoder_set = int(payload or b"0")
-                engine.decoders(decoder_set)  # load now, not when the first audio arrives
+                engine.decoders(decoder_set, final=False)  # load now, not when the first audio arrives
             elif kind == b"S":
                 if session:
                     session.end(cancel=True)
                 sessions += 1
                 t = time.perf_counter()
-                session = Session(engine, payload.decode() or engine.language, emitter(sessions), decoder_set)
-                log.info("session %d start on set %d (%.0f ms)", sessions, decoder_set, (time.perf_counter() - t) * 1000)
+                language, _, options = payload.decode().partition(";")
+                session = Session(engine, language or engine.language, emitter(sessions), decoder_set,
+                                  live_only=options == "live")
+                log.info("session %d start on set %d%s (%.0f ms)", sessions, decoder_set,
+                         ", live only" if options == "live" else "", (time.perf_counter() - t) * 1000)
             elif kind == b"P":
                 job = json.loads(payload)
-                polisher.submit(job["text"], lambda out, i=job["id"]: send({"type": "polished", "id": i, "text": out}))
+                # Also for finals the app made itself (Parakeet): they haven't seen the vocabulary yet.
+                polisher.submit(engine.vocab.normalize(job["text"]), lambda out, i=job["id"]: send({"type": "polished", "id": i, "text": out}),
+                                before=job.get("before", ""))
+            elif kind == b"H":
+                send({"type": "pong"})
             elif kind == b"A" and session:
                 session.push(payload)
+            elif kind == b"K" and session:
+                session.cut(int(payload))
             elif kind in (b"E", b"X") and session:
                 session.end(cancel=kind == b"X")
                 session = None

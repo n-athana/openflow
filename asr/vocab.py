@@ -70,21 +70,23 @@ class Vocabulary:
         """Writes terms the way the vocabulary does. "pool request" (an alias) becomes
         "pull request", and spelling variants of rare terms get fixed: "data garage" and
         "Datagarage" become "Data Garage", "Net vora" becomes "Netvora", "E T L"
-        becomes "ETL". Common words are left alone: a term "ToP" doesn't touch "the top", and
+        becomes "ETL". Near misses too, by spelling or sound: "Netfora", "Nematron",
+        "Jana Waber". Common words are left alone: a term "ToP" doesn't touch "the top", and
         "OpenFlow" doesn't touch "an open flow"."""
         if self._rules is None:
             self._rules = _rules(self.terms)
+            self._fuzzy = Fuzzy(self.terms)
         for pattern, replace in self._rules:
             text = pattern.sub(replace, text)
-        return text
+        return self._fuzzy.fix(text)
 
 
-def common(word: str) -> bool:
-    """A word you'd find in ordinary German or English text."""
+def common(word: str, zipf: float = 4.0) -> bool:
+    """A word you'd find in ordinary German or English text (at 3.0: also less frequent ones, "Gamma")."""
     from wordfreq import zipf_frequency  # lazy: ~0.5 s to load
 
     w = word.lower()
-    return max(zipf_frequency(w, "de"), zipf_frequency(w, "en")) >= 4.0
+    return max(zipf_frequency(w, "de"), zipf_frequency(w, "en")) >= zipf
 
 
 SEP = re.compile(r"[\s-]+")
@@ -125,6 +127,105 @@ def _rules(terms: list[Term]) -> list:
 
         rules.append((re.compile(rf"(?<!\w)(?:{_alternation(patterns)})(?!\w)", re.I), fix))
     return rules
+
+
+def cologne(word: str) -> str:
+    """Kölner Phonetik: German sound code, "Meyer" and "Maier" are both "67"."""
+    w = word.lower().translate(str.maketrans({"ä": "a", "ö": "o", "ü": "u", "ß": "s"}))
+    w = re.sub(r"[^a-z]", "", w)
+    codes = []
+    for i, c in enumerate(w):
+        prev, nxt = w[i - 1] if i else "", w[i + 1] if i + 1 < len(w) else ""
+        if c in "aeijouy":
+            code = "0"
+        elif c == "h":
+            continue
+        elif c == "b" or (c == "p" and nxt != "h"):
+            code = "1"
+        elif c in "dt":
+            code = "8" if nxt in ("c", "s", "z") else "2"
+        elif c in "fvw" or c == "p":
+            code = "3"
+        elif c in "gkq":
+            code = "4"
+        elif c == "c":
+            if i == 0:
+                code = "4" if nxt in tuple("ahkloqrux") else "8"
+            else:
+                code = "4" if nxt in tuple("ahkoqux") and prev not in ("s", "z") else "8"
+        elif c == "x":
+            code = "8" if prev in ("c", "k", "q") else "48"
+        elif c == "l":
+            code = "5"
+        elif c in "mn":
+            code = "6"
+        elif c == "r":
+            code = "7"
+        else:  # s, z
+            code = "8"
+        codes.append(code)
+    out = []
+    for code in "".join(codes):
+        if not out or out[-1] != code:
+            out.append(code)
+    return out[0] + "".join(c for c in out[1:] if c != "0") if out else ""
+
+
+class Fuzzy:
+    """Replaces as many recognized words as a rare term has (up to 3) when they are close to it: by
+    spelling (Damerau-Levenshtein similarity >= 0.75 over the letters) or by sound (same Kölner
+    Phonetik code and similarity >= 0.6). Spans shorter than 5 letters, spans made only of common
+    words ("the top") and single words that are real words ("Gamma") stay: a real word beats a
+    guess. Inspired by Blitztext's custom-term correction."""
+
+    WORD = re.compile(r"[^\W\d_]+")
+
+    def __init__(self, terms: list[Term]):
+        self.terms: dict[str, str] = {}  # letters-only key -> term
+        self.keys: dict[int, list[str]] = {}  # word count -> keys
+        for t in terms:
+            key = re.sub(r"[^\w]|\d|_", "", t.text.lower())
+            words = SEP.split(t.text.strip())
+            if len(key) >= 5 and len(words) <= 3 and not (len(words) == 1 and common(words[0])) \
+                    and key not in self.terms:
+                self.terms[key] = t.text
+                self.keys.setdefault(len(words), []).append(key)
+        self.sounds: dict[str, set[str]] = {}
+        for key in self.terms:
+            self.sounds.setdefault(cologne(key), set()).add(key)
+
+    def fix(self, text: str) -> str:
+        if not self.keys:
+            return text
+        from rapidfuzz.distance import DamerauLevenshtein
+        from rapidfuzz.process import extractOne
+
+        words = list(self.WORD.finditer(text))
+        out, pos, i = [], 0, 0
+        while i < len(words):
+            for n in (3, 2, 1):
+                span = words[i : i + n]
+                if len(span) < n or any(not re.fullmatch(r"[\s-]+", text[a.end() : b.start()])
+                                        for a, b in zip(span, span[1:])):
+                    continue  # only words joined by spaces or hyphens, not across punctuation
+                key = "".join(w.group(0).lower() for w in span)
+                if n not in self.keys or len(key) < 5 or key in self.terms \
+                        or all(common(w.group(0), 4.0 if n > 1 else 3.0) for w in span):
+                    continue
+                best = extractOne(key, self.keys[n], scorer=DamerauLevenshtein.normalized_similarity, score_cutoff=0.6)
+                if not best:
+                    continue
+                match, score, _ = best
+                sound = cologne(key)
+                if score < 0.75 and match not in self.sounds.get(sound, ()):
+                    continue
+                out.append(text[pos : span[0].start()] + self.terms[match])
+                pos = span[-1].end()
+                i += n
+                break
+            else:
+                i += 1
+        return "".join(out) + text[pos:]
 
 
 def parse(markdown: str) -> Vocabulary:
